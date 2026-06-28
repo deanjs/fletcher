@@ -1,0 +1,18 @@
+[project]
+name = "fletcher"
+version = "0.1.0"
+description = "Debate-based multi-agent critic system for content fidelity evaluation"
+requires-python = ">=3.11"
+dependencies = [
+    "transformers>=4.45.0",
+    "accelerate",
+    "bitsandbytes",
+    "pydantic>=2.0",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["fletcher"]
