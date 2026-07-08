@@ -1,357 +1,627 @@
-# FLETCHER
-
-FLETCHER는 텍스트 기반의 학습 에이전트이다. 사용자는 전공 수업 내용을 영어로 설명하면, debate 기반의 멀티 critic 시스템이 그 설명을 grounding된 근거로 검증하고 반박하여 내용의 충실성을 평가한 뒤 사용자의 말투로 복습 노트를 작성한다.
+## 1. Abstract
 
 ---
 
-## 1. Project Goal
+FLETCHER is a text-based learning agent. User(a college student, for example) tells the agent about what he learned in the class, then the debate-based multi-critic system verifies user’s explanation with the grounded evidence, rebuts it when necessary, and evaluates the fidelity of the content. The result of the evaluation would be written in user’s own tone. Critics accumulate the rebuttal skills, which are distilled from debate experiences that were verified either by known ground truth or by strong grounding evidence, continuously update their decision policies through RL based on these experiences.
 
-목표는 다음과 같다.
+## 2. Project Goal
 
-1. 연구 질문 — debate 기반 멀티에이전트 critique가 single-prompt critique보다 내용 충실성 평가에서 실제로 더 정확한가, 그 대가로 응답 시간(latency)과 토큰 사용량을 얼마나 지불하는가 — 를 정량 비교하는 eval harness를 프로젝트의 1급 산출물로 삼는다.
-2. critic의 수와 다양성을 늘리는 것이 항상 더 좋은가, 아니면 어느 지점부터 오히려 성능이 떨어지는가에 대한 정량적인 답을 점진적으로 찾아간다.
-3. 직접 구현으로 얻는 스킬 습득 — LLM이 어떻게 서빙되고, 가속되고, 파인튜닝 되고, 정렬되는지, 그리고 여러 LLM 인스턴스가 어떻게 서로 토론하는지를 black-box API 호출 없이 처음부터 직접 구현하여 익힌다.
+---
 
-### 1.1 Research Goal
+This project aims to answer the following questions.
 
-debate 기반 멀티에이전트 critique가 single-prompt 베이스라인보다 내용 충실성 평가 정확도를 얼마나 높이는가, 그 대가로 응답 시간과 토큰 사용량을 얼마나 지불하는가?
+### 2.1 Research Goal
 
-**독립변수**:
+---
 
-- **debate round 수** (0 = single-prompt 베이스라인, 1, 2, 3...)
-- **critic ensemble 크기 (N)** — 같은 역할의 Content Critic을 몇 명 병렬로 둘 것인가 (다수결/합의 효과)
-- **critic 역할 다양성 (R)** — 서로 다른 관점의 critic 역할을 몇 종류 추가할 것인가 (역할 다양성 효과)
+**Question 1. Is debate-based multi-agent critique more effective than single-prompt critique for evaluating fidelity of the content?**
 
-**종속변수**:
+- How many tokens does each approach consume?
+- How much latency does each approach incur?
 
-- 평가 정확도
-- 응답 시간
-- 토큰 사용량
+**Question 2. Does increasing the number of critics and diversity of agents always lead to better performance?**
 
-**연구 진행 순서 (점진적)**:
+- Here, Diversity means persona diversity within the same role — critics that evaluate the same target with a different disposition, as opposed to R, which assigns critics to different targets.
+- What specific point does performance actually start to decline?
+- Aim to fine the quantitative answer to this progressively.
 
-1. round 수만 고정하고 ensemble 크기(N) 단독으로 스윕 — "같은 역할 여러 명이면 더 정확해지는가"
-2. ensemble 크기 고정하고 역할 다양성(R) 단독으로 스윕 — "다른 관점을 추가하면 더 정확해지는가"
-3. 1, 2에서 얻은 각각의 최적 지점을 조합해 N과 R을 함께 변화시키며 debate round와의 상호작용까지 — 전체 설계공간(design space)에서 정확도/latency/cost 균형이 가장 좋은 조합을 탐색
+**Question 3. If critic accumulates the reusable evaluation skills in previous debate experiences, does utilizing these skills improve model’s actual performance?**
 
-### 1.2 Learning Goal
+- Does skill retrieval improve accuracy compared to Architecture 2 (no skills)?
+- Skill injection adds tokens to the prompt — how large is this overhead, and is the accuracy worthy?
+- Compared to injecting the raw debate trajectory, does the distilled skill achieve similar accuracy at lower token cost? — SkillRL
 
-**(0) 환경 구축**
+**Question 4. How should the underlying LLMs be served, fine-tuned, and aligned to support this system?**
 
-- GPU가 왜, 얼마나 필요한가 — vRAM vs CPU RAM
+- Downstream of the LLM — during serving, inference, real usage.
+- How should the multi-agent system be implemented?
+- How should the agents conduct debate?
+- How can the outcomes of debate experiences be distilled into reusable, compressed knowledge?
+
+### 2.2 Learning Goal
+
+---
+
+**(0) Environment settings — ★★★☆☆**
+
+- Why is GPU necessary?
+- How many GPUs do we need? — vRAM vs. CPU RAM
 - CUDA
-- HuggingFace (모델 로딩, 파이프라인 구조)
-- Unsloth (경량 파인튜닝 프레임워크)
-- Colab (무료 T4 → 필요 시 Pro), Docker, 로컬 `venv` + Github
+- HuggingFace — Model loading, structure of pipeline
+- Unsloth — light fine-tuning framework
+- Colab, Docker, local venv + Github
 
-**(3) Multi-agent 구축, 역할 세분화, shared variable**
+**(1) Designing Multi-agent, role specialization, shared variable — ★★★★☆**
 
 - LangGraph
-- LLM 호출 추상화, prompt 설계
 - orchestration pattern
-- shared variable / state 격리 — race condition, message history, mutex
-- separation of concerns (context, language critic 분리)
-- structured output (Pydantic) — critic 간 통신 스키마 정의
+- Abstracting LLM call, implementing prompt
+- shared variable / state isolation — race condition, message history, mutex
+- Separate roles of agents
+- structured output (Pydantic) — defining communication schema between critics
 - ReAct, AutoGen
 
-**(4) 아첨, 환각 억제**
+**(2) Sycophancy and Hallucination — ★★★★☆**
 
-- critic이 틀린 곳을 탐지하도록 설계 (의도적으로 틀린 설명 주입해서 탐지 여부 확인)
-- 소형 모델의 아첨 경향
-- prompt 기반 억제 vs fine-tuning 기반 억제
-- 아첨의 발생 원인 및 해결책 — self-critique, debate
-- 환각의 개념 및 원인 — parametric knowledge
-- Unsloth 파인튜닝
-- 사후학습(post-training), 강화학습(RL)
-- 학습·평가용 데이터 및 데이터 합성
+- Designing critics to detect errors
+- Injecting deliberately incorrect explanations to test detection
+- Sycophantic tendencies of small models
+- Prompt-based suppression vs. fine-tuning-based suppression
+- Causes and solutions of sycophancy — self-critique, debate
+- Concept and causes of hallucination — parametric knowledge
+- Data for training, evaluation and data synthesis
 
-**(5) Debate 및 대기시간 최소화**
+**(3) Minimizing Debate and Latency — ★★★★★**
 
-- local model limitation
-- multi-agent debate, debate structure (critic / judge)
-- 추론 지연의 원인 찾기
-- 대기 시간 최소화 — asyncio, concurrency, GIL, early stopping
+- Local model limitation
+- Multi-agent debate, debate structure (critic / judge)
+- Identifying the causes of inference latency
+- Minimizing latency — asyncio, concurrency, GIL, early stopping
 - KV Cache, Flash Attention, Paged Attention
 - vLLM, GPU parallelism
 
-**(6) Grounding / RAG**
+**(4) Grounding / RAG — ★★★☆☆**
 
 - RAG, embedding, grounding
-- Docker, 쿠버네티스 (멀티 컨테이너로 critic 격리/서빙할 경우)
+- Docker, Kubernetes (if serving/isolating critics across multiple containers)
+
+**(5) Personalization — NoteWriter — ★☆☆**
+
+- Style transfer / persona-preserving prompting
+- Few-shot-based tone reproduction vs. fine-tuning-based tone reproduction
+
+**(6) Skill-Based Self-Improvement (Self-Improving Agent) — ★★★★★**
+
+This section is based on 2 papers: SAGE, SkillRL
+
+- Experience distillation — extracting reusable skills from successful/failed debate process(SkillRL)
+- Hierarchical skill library design — general skills vs. task-specific skills (SkillRL)
+- Skill retrieval — dynamic retrieval based on semantic similarity (SkillRL)
+- GRPO (Group Relative Policy Optimization) — policy updates without a critic model (SAGE)
+- Skill-integrated reward design — outcome reward + skill-reuse reward + anomaly penalty (SAGE)
+- Sequential rollout / recursive skill-policy co-evolution (SAGE, SkillRL)
+- Unsloth fine-tuning, post-training, reinforcement learning (RL)
+
+## 3. Desing Principles
 
 ---
 
-## 2. 핵심 차별점
-
-### 2.1 FLETCHER — Self-Sycophancy를 견제하는 critic
-
-영화 *위플래쉬*의 Fletcher는 "잘했어"를 남발하지 않는다. 다만 FLETCHER에서 이 테마가 막아야 하는 대상은 "사용자에게 아첨"이 아니라 **"critic 자신이 사용자 설명을 대충 보고 안일하게 통과시키는 것(self-sycophancy)"** 이다. critic 한 명만 두면 이걸 잡을 방법이 없다 — critic 여러 명이 서로의 평가를 의심하고 반박하는 구조(debate)가, 한 critic이 안일하게 넘긴 오류를 다른 critic이 잡아내는 메커니즘이 된다.
-
-→ Learning Goal **(4) 아첨, 환각 억제** 중 "아첨의 발생 원인 및 해결책 — self-critique, debate" / **(5) Debate 및 대기시간 최소화** 중 "multi-agent debate, debate structure (critic / judge)"
-
-### 2.2 Grounded Content Critic
-
-전공 내용 정확성을 critic의 parametric knowledge(모수 지식)에만 의존해 판단하면, 사용자의 오개념을 critic이 함께 틀리며 승인하는 환각 채점기가 된다. Content Critic은 강의자료·논문을 RAG로 검색해 ground truth에 비춰 채점한다.
-
-→ Learning Goal **(4) 아첨, 환각 억제** 중 "환각의 개념 및 원인 — parametric knowledge" / **(6) Grounding / RAG** 중 "RAG, embedding, grounding"
-
-### 2.3 토론 — 왜 멀티에이전트인가
-
-"Content Critic이 내용을 보고, Language Coach가 영어를 본 뒤 결과를 그냥 합친다"는 분업(division of labor) 구조는, 결과적으로 LLM을 순차적으로 두 번 부르는 것과 다르지 않다 — 멀티에이전트라서 더 정확해진다는 근거가 되지 못한다. 진짜 멀티에이전트의 가치는 **같은 평가 대상에 대해 의견이 갈렸을 때 서로 반박하며 합의(consensus)에 도달하는 과정** 자체에 있다. 이 차이를 증명하는 것이 연구 목표의 핵심이다.
-
-→ Learning Goal **(3) Multi-agent 구축** 중 "orchestration pattern", "separation of concerns (context, language critic 분리)" / **(5) Debate 및 대기시간 최소화** 중 "multi-agent debate, debate structure (critic / judge)"
+### 3.1 FLETCHER — A Critic That Guards Against Self-Sycophancy
 
 ---
 
-## 3. System Architecture
+In the movie Whiplash, Fletcher never gives easy praise. In FLETCHER, this theme targets not about flattering the user but stopping the critic itself from checking the user’s explanation too quickly and approving it without noticing mistakes (self-sycophancy). When several critics question and challenge each other’s judgments (debate), a mistake that one critic misses can be caught by another critic.
 
-### 3.1 Architecture 1 — Self-Critique (single-agent baseline)
+→ Learning Goal (2) "Causes and solutions of sycophancy — self-critique, debate" / (3) "Multi-agent debate, debate structure (critic / judge)”
 
+### 3.2 Grounded Content Critic
+
+---
+
+If the critic judges accuracy only using what it already knows (its own training knowledge — parametric knowledge), it might approve an answer that still contains the same mistake user made. This is because the critic has no outside source to check against. — hallucinations. The Content Critic fixes this by searching lecture materials and papers, utilizing RAG, and comparing the user’s explanation against these actual materials.
+
+→ Learning Goal (2) "concept and causes of hallucination — parametric knowledge" / (4) "RAG, embedding, grounding"
+
+### 3.3 Debate — Why Multi-Agent
+
+---
+
+There is no different from calling single LLM many times if each critic just checks its own part and the results are simply put together sequentially, which is the division and merge of labor. — not a multi-agent. The true value of multi-agent comes from the process of approaching to consensus during debating — disagree with the common eval target, challenge each other and work toward the same conclusion.
+
+Proving this disagreement and challenge process actually improves accuracy is the main goal of this research.
+
+→ Learning Goal **(1)** "orchestration pattern, separation of concerns" / **(3)** "multi-agent debate"
+
+### 3.4 Personalization — Notes in the User’s Own Tone.
+
+---
+
+NoteWriter takes the user’s explanation, and the result of the debate, write down the note for that contents.
+
+→ Learning Goal (5) "style transfer / persona-preserving prompting”
+
+### 3.5 Accumulating Skills — Not Throwing Away Experience
+
+---
+
+Even if debates make the critics improve the accuracy every time, if critic starts form the beginning every single session, the time and cost never go down. SKILLRL points out that saving every raw trajectory is wasteful, redundant and noise-heavy, suggests pulling out only the useful parts of past experience. FLETCHER follows this idea. Whenever a critic successfully catches a misconception during debate or misses one, that experience is turned into a skill, distilled, and saved in SkillBank for that critic. The next time a similar debate happens, the critic can look up and retrieve that skill.
+
+→ Papers referenced: SkillRL — experience-based distillation, hierarchical SkillBank / SAGE — GRPO-based policy optimization, skill-integrated reward, Sequential Rollout (detailed mapping in 4.3)
+
+→ Learning Goal (6) entire category / (2) "post-training, reinforcement learning" / (3) "identifying the causes of inference latency"
+
+---
+
+## 4. System Architecture
+
+---
+
+### 4.1 Architecture 1 — Self-Critique (single-agent baseline)
+
+---
+
+```mermaid
+flowchart TD
+    A["Input Text"]
+    B["Single LLM<br/>1st Evaluation"]
+    C["Same LLM<br/>Self-Critique (1 Pass)"]
+    D["NoteWriter"]
+
+    A --> B
+    B --> C
+    C --> D
 ```
-텍스트 입력 (전공 내용을 영어로 설명)
-        │
-        ▼
-   단일 LLM — 1차 평가 생성
-        │
-        ▼
-   동일 LLM — 자기 출력 재검토 (self-critique, 1 pass)
-        │
-        ▼
-   NoteWriter   (사용자 말투로 복습 노트 작성)
+
+This is the "single-prompt critique" baseline from Question 1. The same LLM checks its own output one more time — this is the comparison point that shows whether we even need multiple critics.
+
+→ Learning Goal **(2)** "self-critique"
+
+### 4.2 Architecture 2 — Multi-agent Debate
+
+---
+
+```mermaid
+flowchart LR
+    Input["Text input"]
+
+    subgraph Stage1["Stage 1: Reaching Consensus Within Each Role (N axis)"]
+        subgraph Conceptual["Conceptual Critic × N"]
+            direction TB
+            CC["Evaluate in parallel"]
+            CC --> CDisagree{"Do they disagree?"}
+            CDisagree -->|Yes| CDebate["Debate Round × K"]
+            CDisagree -->|No| CAgree["Immediate agreement"]
+            CDebate --> CResult["Conceptual Critic's agreed result"]
+            CAgree --> CResult
+        end
+
+        subgraph Procedural["Procedural Critic × N"]
+            direction TB
+            PC["Evaluate in parallel"]
+            PC --> PDisagree{"Do they disagree?"}
+            PDisagree -->|Yes| PDebate["Debate Round × K"]
+            PDisagree -->|No| PAgree["Immediate agreement"]
+            PDebate --> PResult["Procedural Critic's agreed result"]
+            PAgree --> PResult
+        end
+    end
+
+    subgraph Stage2["Stage 2: Combining Results Across Roles (R axis)"]
+        direction TB
+        Synth["Synthesizer<br/>combines Conceptual + Procedural results —<br/>not a disagreement to resolve"]
+    end
+
+    NoteWriter["NoteWriter"]
+
+    Input --> Conceptual
+    Input --> Procedural
+    CResult --> Synth
+    PResult --> Synth
+    Synth --> NoteWriter
 ```
 
-1.1에서 정의한 **debate round = 0 베이스라인**. 에이전트가 여러 개가 아니라, 같은 LLM이 자기 출력을 한 번 더 검토하는 구조 — multi-agent가 아니라 single-prompt의 확장판. "critic 여러 명이 필요 없다면 이걸로 충분해야 한다"는 게 비교 기준점.
+#### 4.2.1 Role specialization
 
-→ Learning Goal **(4) 아첨, 환각 억제** 중 "아첨의 발생 원인 및 해결책 — self-critique"
+---
 
-### 3.2 Architecture 2 — Multi-agent Debate
+The Content Critic is split into two roles (R = 2). The **Conceptual Critic** checks whether the concepts and definitions themselves are correct, using RAG to compare against the concept-explanation parts of the lecture material. The **Procedural Critic** checks whether the steps and order of applying a concept are logically correct, using RAG to compare against worked examples and proofs in the lecture material. Because the two critics search for different material and use different evaluation criteria, this role separation has real practical meaning. This same separation carries over into the SkillBank in 4.3, where each critic accumulates its own independent set of skills. A Completeness Critic — which would require curriculum-level ground truth (e.g., a table of contents or a concept graph) — will be added as a third role once the RAG infrastructure is expanded.
 
+→ Learning Goal **(1)** "separation of concerns"
+
+#### 4.2.2 Size of Ensemble
+
+---
+
+N controls how many critics of the same role run in parallel. These N critics are not identical copies. If they shared the same model. prompt, input, and seed, their outputs would be almost identical, no disagreement would arise, leading debate never triggers (round = 0). N would be indistinguishable from N = 1. In order to make N meaningful, each critic within a role is assigned a distinct persona along a single Strict-Merciful axis.
+
+```mermaid
+graph TD
+    A["Role: Conceptual Critic"]
+
+    A --> B["persona[0]: Strict<br/>flags on ambiguity,<br/>low tolerance for imprecision"]
+    A --> C["persona[1]: Merciful<br/>passes on ambiguity,<br/>tolerant of imprecise phrasing"]
+    A --> D["persona[2]: Neutral<br/>added only at N = 3"]
 ```
-텍스트 입력
-        │
-        ▼
-   Content Critic × N, 역할 R종   (병렬, 독립적으로 1차 평가)
-        │
-        ▼
-   Orchestrator   (의견 충돌 감지)
-        │
-   ┌────┴────────────────┐
- 합의 도출됨           의견 충돌 있음
-   │                     ▼
-   │              Debate Round × K (최대 라운드 제한)
-   └─────────┬───────────┘
-             ▼
-       Synthesizer → NoteWriter
+
+- **Strict / Merciful** — differ in judgment threshold, not in _what_ they evaluate. Both a Strict and a Merciful Conceptual Critic look at the same concept against the same retrieved material; they differ only in how readily they flag it.
+- **N = 2** → {Strict, Merciful}; **N = 3** → {Strict, Merciful, Neutral}.
+
+This axis is chosen because it structurally induces disagreement on exactly the cases that matter: a hard negative that a Merciful critic waves through is precisely what a Strict critic is built to catch. Persona diversity is therefore the engine that gives both majority vote (N critics) and debate (round > 0) something to actually resolve.
+
+**Axis separation (N vs. R).** Persona is orthogonal to role and must stay that way:
+
+- **R (role)** = _different evaluation target_ — Conceptual sees concepts, Procedural sees procedure.
+- **N (persona)** = _different disposition on the same target_ — Strict vs. Merciful on the same concept.
+
+Persona is always nested inside a role. A Strict persona attached to the Conceptual role and a Strict persona attached to the Procedural role are different instances. This keeps the N-effect and the R-effect cleanly attributable.
+
+→ Learning Goal **(1)** "orchestration pattern" / **(3)** "GPU parallelism"
+
+#### 4.2.3 Debate depth
+
+---
+
+K — Controls how many rebuttal rounds are allowed when critics disagree and what the stopping condition is. K applies only within Stage 1, which is for the disagreement among critics sharing the same role. Stage 2 is for the combining results across roles, one-time synthesis step which does not involve debate rounds. For controlled comparison experiments, we use a fixed number of rounds by default, and later compare this against stopping early once consensus is reached.
+
+→ Learning Goal **(3)** "multi-agent debate, debate structure", "early stopping"
+
+### 4.3 Architecture 3 — Skill-Augmented Debate
+
+---
+
+This adds a per-critic SkillBank on the top of Architecture 2. It reorganizes the methods from 2 papers — **SAGE**(Reinforcement Learning for Self-Improving Agent with Skill Library) and **SkillRL**(Evolving Agents via Recursive Skill-Augmented Reinforcement Learning). — to fit the text-based critic evaluation problem.
+
+```mermaid
+flowchart LR
+    Input["Text input"]
+    Critic["Content Critic × N, R types of roles<br/>evaluates after skill retrieval"]
+    Orchestrator["Orchestrator"]
+    Consensus["Consensus reached"]
+    Disagreement["Disagreement found"]
+    Debate["Debate Round × K"]
+    Synth["Synthesizer"]
+    NoteWriter["NoteWriter"]
+    Log[("Debate Log<br/>includes success/failure labels")]
+
+    Input --> Critic
+    Critic --> Orchestrator
+    Orchestrator --> Consensus
+    Orchestrator --> Disagreement
+    Disagreement --> Debate
+    Debate --> Synth
+    Consensus --> Synth
+    Synth --> NoteWriter
+    Synth --> Log
 ```
 
-#### 3.2.1 Role specialization
-
-"내용 정확성"이라는 같은 목표를 다른 관점에서 보는 critic을 몇 종류 둘 것인가. 후보 세 가지를 검토했고, 정당화 강도와 인프라 준비 상태에 따라 단계적으로 도입한다.
-
-**채택 (R=2, MVP부터 적용)**
-
-- **Conceptual Critic** — 개념·정의 자체의 정확성을 본다. 강의자료의 개념 설명 부분을 RAG로 검색해 대조.
-- **Procedural Critic** — 개념은 맞아도 적용 절차·단계 순서가 논리적으로 맞는지를 본다. 강의자료의 예제 풀이·증명 과정을 RAG로 검색해 대조.
-- 채택 이유: 두 critic이 요구하는 RAG 검색 대상과 평가 방식이 서로 다름 — 역할 분리가 "각자 다른 context가 필요하다"는 기준을 만족시키는 가장 깔끔한 사례.
-
-**보류 (Phase 2 이후, 6번 로드맵에 별도 기재)**
-
-- **Completeness Critic** — 설명에 빠진 내용이 있는지를 전담. 보류 이유: 판단 기준이 단순 문서 검색이 아니라 커리큘럼 수준의 ground truth(목차·개념 그래프)를 필요로 함 — 현재 RAG 인프라(강의자료 2-3개) 수준으로는 부족.
-
-**제외**
-
-- **Clarity Checker** — 설명이 모호해서 채점 자체가 불가능한 수준인지를 체크. 제외 이유: 사실상 기존 LanguageCoach의 부활이며, "영어는 평가 대상이 아니다"(한 줄 정의)와 충돌해 혼란을 야기.
-
-→ Learning Goal **(3) Multi-agent 구축** 중 "separation of concerns (context, language critic 분리)"
-
-#### 3.2.2 Ensemble 크기
-
-같은 역할의 critic을 몇 명 병렬로 둘 것인가 (다수결/합의 효과).
-
-→ Learning Goal **(3)** "orchestration pattern" / **(5)** "GPU parallelism"
-
-#### 3.2.3 Debate depth
-
-의견 충돌 시 몇 라운드까지 반박을 허용할 것인가, 종료 조건은 무엇인가 (합의 도달 시 조기 종료 vs 고정 라운드).
-
-→ Learning Goal **(5) Debate 및 대기시간 최소화** 중 "multi-agent debate, debate structure (critic / judge)", "early stopping"
-
-### 3.3 최종 목표
-
-Architecture 1(self-critique)과 Architecture 2(multi-agent debate, R/N/K 세 축)를 같은 입력으로 돌려 비교하고, **정확도 대비 속도(latency)·비용(token)이 가장 효율적인 지점**을 찾는다. "에이전트가 많을수록 무조건 좋은가"에 대한 답은 이 탐색 과정에서 나온다 — 어느 지점부터 R·N·K를 늘려도 정확도 향상이 없거나 오히려 떨어지는지(사공이 많으면 배가 산으로 가는 지점)를 데이터로 보이는 게 핵심 결과물.
+#### 4.3.1 SkillBank Structure
 
 ---
 
-## 4. 알아야 할 어려운 문제들
+The SkillBank is organized in two layers: general skills shared by every critic (domain-agnostic principles, e.g., "check whether the definition comes first and the example follows"), and task-specific skills kept separate for each critic (error patterns specific to the Conceptual or Procedural role). Retrieval is done dynamically based on semantic similarity.
+→ Paper reference: SkillRL — hierarchical SkillBank
 
-### 4.1 Content Critic grounding 없으면 환각 채점기가 됨
-
-RAG로 강의 PDF·논문을 vector DB에 넣고 ground truth 대조. MVP는 강의자료 몇 개만으로 시작. Conceptual Critic과 Procedural Critic이 검색할 대상이 다르므로(개념 설명 vs 예제 풀이), 같은 vector DB라도 검색 쿼리·청크 단위를 critic별로 다르게 설계해야 함.
-
-→ Learning Goal **(6) Grounding / RAG** 중 "RAG, embedding, grounding"
-
-### 4.2 의견 충돌(disagreement)을 어떻게 정의하고 감지할 것인가
-
-Orchestrator가 "합의됨"과 "충돌 있음"을 가르는 기준이 모호하면 안 됨 — critic들의 평가가 점수 형태라면 임계값(threshold) 차이로 판단할지, 텍스트 평가라면 별도 판정 모델이 필요한지부터 정의해야 함. 이 기준이 느슨하면 항상 debate가 트리거되어 3.3에서 측정하려는 "round=0 vs round>0" 비교 자체가 무의미해지고, 너무 빡빡하면 거의 합의로 처리돼서 멀티에이전트 효과를 측정할 기회가 사라짐.
-
-→ Learning Goal **(3) Multi-agent 구축** 중 "orchestration pattern"
-
-### 4.3 Debate 종료 조건 — 무한 토론 방지
-
-critic들이 토론을 진행하면 할수록 성능이 어떻게 변하는가, 몇 라운드까지가 적당한가(3.2.3 debate depth, K). 종료 조건 후보:
-
-- **고정 라운드**: K를 미리 정해두고 무조건 K번 토론 후 종료 (가장 단순, 비교 실험엔 유리)
-- **합의 도달 시 조기 종료**: critic들의 평가가 수렴하면 K 전이라도 멈춤 (실서비스엔 유리하지만, round 수 자체가 변수가 되어버려 실험 통제가 어려워짐)
-- **최종 판단자(judge) 도입**: critic들이 끝까지 합의 못 하면 별도 judge 에이전트가 최종 판단
-
-MVP 단계에서는 비교 실험의 통제를 위해 **고정 라운드 방식**으로 시작하고, 이후 조기 종료·judge 방식을 추가 비교.
-
-→ Learning Goal **(5) Debate 및 대기시간 최소화** 중 "multi-agent debate, debate structure (critic / judge)", "early stopping"
-
-### 4.4 Hard Negative 테스트셋 구축 — 아첨(self-sycophancy) 측정 방법론
-
-"critic이 안일하게 대충 넘기는가"를 측정하려면, critic이 틀린 곳을 잡아내는지 검증할 수 있는 정답이 있는 테스트셋이 필요함. 사용자의 영어 설명에 **의도적으로 그럴듯한 오개념을 주입**한 입력을 만들어, single-prompt critic과 debate critic 중 누가 더 잘 잡아내는지 비교. 이게 2.1(self-sycophancy 견제)을 실제로 정량 측정하는 방법.
-
-→ Learning Goal **(4) 아첨, 환각 억제** 중 "critic이 틀린 곳을 탐지하도록 설계 (의도적으로 틀린 설명 주입해서 탐지 여부 확인)"
-
-### 4.5 대기 시간(latency) 처리 — batch 우선, 최적화는 나중
-
-실시간 streaming + multi-agent 호출은 느림. MVP는 "입력 종료 → 처리" batch 방식. 단, 3.1(self-critique)과 3.2(debate, R/N/K)를 같은 batch 파이프라인으로 비교 가능하게 만들어야 3.3 최종 목표(정확도 대비 속도·비용 최적점 탐색)가 성립함. streaming·continuous batching 같은 서빙 최적화는 Phase 3.
-
-→ Learning Goal **(5) Debate 및 대기시간 최소화** 중 "KV Cache, Flash Attention, Paged Attention", "vLLM, GPU parallelism" (단, 이 단계에선 적용 안 하고 Phase 3로 미룸)
+#### 4.3.2 Experience Distillation
 
 ---
 
-## 5. Eval Harness 설계 (연구 핵심)
+From the debate log (6.8), trajectories are distilled based on a **success/failure label**. This label comes from two sources:
 
-위에서 정의한 변수·아키텍처·테스트셋을 하나의 실험 설계로 통합한다.
+1. **Labeled hard negative set (primary).** For inputs where a misconception was deliberately injected (5.3), ground truth is known, so success (a critic correctly caught the hard negative) and failure (missed it, or raised a false positive) are labeled directly. This mirrors SkillRL, where the success/failure signal **r(τ)** comes from an environment reward — here the injected-label set plays that role.
+2. **High-confidence real session (extension).** Real user explanations have no ground truth. We therefore label only a **high-confidence subset**: cases where critic consensus is strong _and_ a retrieved lecture passage directly contradicts (or directly supports) the user's claim. When both conditions hold, the grounding itself acts as a weak verifier and the case is labeled; otherwise the session is discarded, not distilled. This is self-training with confidence filtering — the RAG grounding infrastructure (5.4) is reused as an automatic labeler.
 
-### 5.1 비교 대상
+Successful trajectories are distilled into strategy patterns ("this type of misconception is caught by this kind of rebuttal"). Failed trajectories are distilled into lessons learned ("the critic was too lenient with this kind of phrasing").
 
-3.1(Architecture 1 — Self-Critique)과 3.2(Architecture 2 — Multi-agent Debate)를 **같은 입력셋**으로 돌려 비교하는 것이 이 harness의 존재 이유. "multi-agent" 안에 R/N/K 세 축이 있다는 게 핵심.
+→ Paper reference: SkillRL — experience-based distillation mechanism
 
-### 5.2 독립변수 (실험 조작 변인)
-
-| 변수                | 정의                                                 | 실험 범위(초기) |
-| ------------------- | ---------------------------------------------------- | --------------- |
-| Architecture        | Self-Critique vs Multi-agent Debate                  | {1, 2}          |
-| Debate round 수 (K) | 의견 충돌 시 토론 라운드 수 (4.3: MVP는 고정 라운드) | {0, 1, 2, 3}    |
-| Ensemble 크기 (N)   | 같은 역할 critic 병렬 수                             | {1, 2, 3}       |
-| 역할 다양성 (R)     | critic 역할 종류 수 (3.2.1: Conceptual, Procedural)  | {1, 2}          |
-
-3.3에서 말한 "최적점 탐색"은 이 네 변수의 조합 공간(design space)에서 종속변수가 가장 좋은 지점을 찾는 일이다.
-
-### 5.3 종속변수 (측정 지표)
-
-- **평가 정확도** — 4.4의 Hard Negative 테스트셋 기준, critic이 의도적으로 주입된 오개념을 잡아내는 비율(recall) + 정상 설명을 오답으로 잘못 판정하는 비율(false positive)
-- **응답 시간(latency)** — 입력부터 최종 Synthesizer 출력까지 걸린 시간
-- **토큰 사용량(token usage)** — 전체 파이프라인이 소비한 입출력 토큰 합
-
-### 5.4 데이터셋 — 두 종류 필요
-
-1. **Hard Negative 테스트셋** (4.4) — 의도적으로 그럴듯한 오개념을 주입한 입력. critic의 탐지 능력(정확도) 측정용.
-2. **정상 설명 데이터셋** — 사용자가 실제로 전공 내용을 영어로 설명한(또는 합성한) 정상 입력. False positive 측정 및 일반적인 latency/token 측정용.
-
-두 데이터셋 다 강의자료 grounding 대상(4.1)과 짝이 맞아야 함 — Hard Negative를 만들 때도 "이 강의자료 기준으로 틀린 것"이어야 채점 가능.
-
-### 5.5 재현성 (Reproducibility)
-
-결과는 재현 가능하게 시드·설정을 기록한다. Architecture/K/N/R 조합별로 같은 입력 batch를 사용해야 비교가 공정함 — 입력 순서·샘플링 시드를 조합 간 고정.
-
-### 5.6 ICICPE 페이퍼 연결 데이터 보존
-
-debate 결과(critic들의 반박 과정, 합의에 이르는 토론 로그)는 ICICPE 페이퍼(debate-distilled fine-tuning) 아이디어와 연결될 수 있는 데이터이므로, eval 실행 시 최종 점수만 남기지 않고 **각 critic의 1차 평가, 라운드별 반박 내용, 최종 합의까지 전체 토론 로그를 별도로 저장**한다.
+#### 4.3.3 Policy Improvement
 
 ---
 
-## 6. 로드맵
+We improve the critic's skill utilization in **three stages**, in this order:
 
-**Phase 0 — 루프 닫기**
-전공 내용을 영어 텍스트로 입력 → Architecture 1(Self-Critique) 단일 파이프라인 → 텍스트 출력. CLI/노트북. "설명하면 뭐라도 피드백이 나온다"를 가장 먼저 증명. 이 단계에서 LLM 호출 추상화(1.2 Learning Goal (3))를 깔아둬서 이후 Architecture 2와 비교 가능한 구조로 시작.
+**(1) Skill retrieval on/off sweep.** First measure the effect of retrieval itself — does injecting a retrieved skill into the prompt change accuracy at all?
 
-| 단계 | 내용                                                                        | Learning Goal                                           |
-| ---- | --------------------------------------------------------------------------- | ------------------------------------------------------- |
-| 0-1  | 모델 선택 (Qwen2.5-7B/Llama-3.1-8B/Mistral-7B 중 택1) + Colab GPU 환경 세팅 | (0) GPU가 왜, 얼마나 필요한가 — vRAM vs CPU RAM / Colab |
-| 0-2  | 최소 repo 골격 구성 (`pyproject.toml`, `venv`, Github)                      | (0) Docker, 로컬 venv + Github                          |
-| 0-3  | LLM 호출 추상화 레이어 구현 (single-call ↔ multi-agent 갈아끼울 수 있게)    | (3) LLM 호출 추상화, prompt 설계                        |
-| 0-4  | Self-Critique 파이프라인 (Architecture 1) 구현                              | (4) 아첨의 발생 원인 및 해결책 — self-critique, debate  |
-| 0-5  | NoteWriter 최소 버전 구현                                                   | — (조립 단계, 신규 학습 항목 없음)                      |
-| 0-6  | CLI에서 끝단까지 한 번 돌려서 "설명하면 피드백이 나온다" 확인               | — (통합 검증)                                           |
+**(2) Cold-Start SFT.** Small models (Qwen2.5-3B/7B) do not know _how_ to use a retrieved skill — simply providing skills to an unchanged model yields limited benefit. Following SkillRL's Cold-Start finding (removing it dropped their accuracy from 89.9 to 65.2), we first teach the critic to retrieve, interpret, and apply skills via SFT on demonstration trajectories, **before** any RL. Without this stage, a null result on S=on is uninterpretable: we cannot tell whether the skill was useless or whether the model simply failed to use it.
 
-**Phase 1 — Multi-agent Debate 구축**
-3.2 아키텍처 구현: Conceptual Critic + Procedural Critic (R=2) 분리, Orchestrator의 합의/충돌 판정(4.2) 구현, 고정 라운드 debate(4.3) 구현, structured output(Pydantic)으로 critic 간 통신. CLI/Gradio.
+**(3) GRPO.** Only then do we run GRPO to further improve the policy toward better skill utilization. The reward combines an outcome reward (hard negative detection accuracy), a skill-reuse reward (given when a past skill is actually used to reach the correct answer), and an anomaly penalty (structured-output schema violation).
 
-| 단계 | 내용                                                                            | Learning Goal                                                 |
-| ---- | ------------------------------------------------------------------------------- | ------------------------------------------------------------- |
-| 1-1  | LangGraph 기초 학습 + 그래프 스켈레톤 작성                                      | (3) LangGraph                                                 |
-| 1-2  | structured output 스키마 정의 (critic 출력용 Pydantic 모델)                     | (3) structured output (Pydantic) — critic 간 통신 스키마 정의 |
-| 1-3  | Conceptual Critic, Procedural Critic 분리 구현 (각자 prompt·RAG 검색 대상 분리) | (3) separation of concerns (context, language critic 분리)    |
-| 1-4  | Orchestrator — 의견 충돌 감지·합의 판정 로직 구현                               | (3) orchestration pattern                                     |
-| 1-5  | Debate Round 구현 (고정 라운드 K)                                               | (5) multi-agent debate, debate structure (critic / judge)     |
-| 1-6  | Synthesizer 구현                                                                | — (조립 단계)                                                 |
-| 1-7  | Architecture 2 전체 파이프라인 연결 + CLI/Gradio로 동작 확인                    | (3) shared variable / state 격리 — race condition             |
+Skill retrieval happens in real time on every user request, but Cold-Start SFT and GRPO run **asynchronously as a separate batch process** once enough labeled debate logs have accumulated. While training runs, the existing critic checkpoint keeps serving; the new checkpoint is swapped in only after training completes. Accordingly, the latency measurements in 6.3 cover only the inference path (including retrieval) and exclude all training time.
 
-**Phase 1.5 — Eval Harness 구축 (연구 핵심)**
-5번에서 설계한 비교 프레임워크 실제 구현. Hard Negative 테스트셋(4.4) 1차 구축, Architecture 1 vs 2 비교, K/N/R 첫 스윕(1.1 연구 진행 순서 1단계: ensemble 크기 단독 스윕부터).
+→ Paper reference: SAGE — GRPO, skill-integrated reward, Sequential Rollout / SkillRL — Cold-Start SFT
 
-| 단계  | 내용                                                    | Learning Goal                                   |
-| ----- | ------------------------------------------------------- | ----------------------------------------------- |
-| 1.5-1 | Hard Negative 테스트셋 1차 구축 (의도적 오개념 주입)    | (4) critic이 틀린 곳을 탐지하도록 설계          |
-| 1.5-2 | 정상 설명 데이터셋 구축                                 | (4) 학습·평가용 데이터 및 데이터 합성           |
-| 1.5-3 | 평가 정확도·latency·token 측정 코드 작성 (`metrics.py`) | (5) 추론 지연의 원인 찾기                       |
-| 1.5-4 | `run_comparison.py` — Architecture 1 vs 2 비교 실행     | — (연구 목표 1.1의 실행, 핵심 산출물)           |
-| 1.5-5 | Ensemble 크기(N) 단독 스윕 — 연구 진행 순서 1단계       | (3) orchestration pattern / (5) GPU parallelism |
-
-**Phase 2 — Grounding 고도화 & 역할 확장**
-Content Critic RAG를 본격적으로 확장 (Conceptual/Procedural critic별 검색 대상 분리, 4.1). **Completeness Critic 추가** (3.2.1에서 보류했던 항목 — 커리큘럼 수준 ground truth 인프라가 갖춰진 후 도입). K/N/R 스윕 2단계(역할 다양성 단독 스윕)·3단계(조합 탐색, 3.3 최종 목표) 진행.
-
-| 단계 | 내용                                                              | Learning Goal                                   |
-| ---- | ----------------------------------------------------------------- | ----------------------------------------------- |
-| 2-1  | vector DB 구축, 강의자료 임베딩                                   | (6) RAG, embedding, grounding                   |
-| 2-2  | critic별 검색 대상 분리 적용 (Conceptual vs Procedural 쿼리 분기) | (6) RAG, embedding, grounding                   |
-| 2-3  | Completeness Critic 추가                                          | (3) separation of concerns                      |
-| 2-4  | 역할 다양성(R) 단독 스윕 — 연구 진행 순서 2단계                   | (3) separation of concerns                      |
-| 2-5  | N×R×K 조합 탐색 — 연구 진행 순서 3단계 (최종 목표)                | (3) orchestration pattern + (5) GPU parallelism |
-
-**Phase 3 — 서빙 최적화 & 강화학습 적용**
-로컬 모델 서빙 최적화 적용 — KV Cache, Flash Attention, vLLM, GPU parallelism (1.2 Learning Goal (5), 4.5에서 의도적으로 미뤄둔 항목). Unsloth 파인튜닝·사후학습·강화학습(1.2 Learning Goal (4))을 적용해 critic 자체를 self-sycophancy에 강하게 만드는 실험. ICICPE 페이퍼(debate-distilled fine-tuning)와 직접 연결되는 단계 — 5.6에서 보존해둔 토론 로그가 이 단계의 학습 데이터가 됨.
-
-| 단계 | 내용                                  | Learning Goal                                        |
-| ---- | ------------------------------------- | ---------------------------------------------------- |
-| 3-1  | KV Cache, Flash Attention, vLLM 적용  | (5) KV Cache, Flash Attention, Paged Attention, vLLM |
-| 3-2  | GPU parallelism 실험                  | (5) GPU parallelism                                  |
-| 3-3  | Unsloth 파인튜닝 적용                 | (4) Unsloth 파인튜닝                                 |
-| 3-4  | 사후학습·강화학습 실험                | (4) 사후학습(post-training), 강화학습(RL)            |
-| 3-5  | ICICPE 페이퍼용 토론 로그 데이터 정리 | — (연구 출판 작업)                                   |
+#### 4.3.4 Experiment Order
 
 ---
 
-## 7. 기술 스택
+Sweeping S at the same time as R/N/K would make it impossible to isolate what is actually causing changes in accuracy. Therefore, following the research progression in 2.1, we first fix the optimal combination of R/N/K, and only then sweep S on/off on top of that fixed configuration.
 
-API 호출 없이 로컬/from-scratch로 LLM을 직접 서빙·가속·파인튜닝하는 것이 전제.
-
-| 영역           | 선택                                                                 | 비고                                                                                                         |
-| -------------- | -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
-| 컴퓨팅 환경    | Colab 무료 T4 → 필요 시 Colab Pro                                    | M4 맥북 MPS는 보조용(가벼운 inference 테스트), 파인튜닝·강화학습·N개 critic 동시 서빙은 Colab GPU가 메인     |
-| 모델 로딩/서빙 | HuggingFace Transformers, vLLM                                       | Architecture 1/2 비교 실험에서 동일 모델을 여러 critic 인스턴스로 띄워야 하므로 vLLM의 멀티 요청 서빙이 핵심 |
-| 가속/최적화    | CUDA, KV Cache, Flash Attention, Paged Attention, GPU parallelism    | Phase 3 항목 (4.5에서 미뤄둔 서빙 최적화)                                                                    |
-| 파인튜닝/정렬  | Unsloth, 사후학습(post-training), 강화학습(RL)                       | Phase 3 항목 — critic의 self-sycophancy를 줄이는 방향으로 직접 학습                                          |
-| Orchestration  | LangGraph                                                            | N개 critic 병렬 호출 + Orchestrator 합의판정 + debate round 제어를 그래프로 표현                             |
-| RAG            | vector DB + 강의자료 (Conceptual/Procedural critic별 검색 대상 분리) | 5.4 데이터셋과 짝 맞춰 구축                                                                                  |
-| 데이터 합성    | 합성 데이터 생성 (Hard Negative 테스트셋, 5.4)                       | LLM을 이용해 의도적 오개념 주입 데이터 생성                                                                  |
-| 컨테이너/격리  | Docker, (필요 시) 쿠버네티스                                         | critic 인스턴스 격리·자원 분배 (3.2.2 ensemble 크기 N과 직결)                                                |
-| 저장           | SQLite + markdown 노트                                               | 토론 로그(5.6) 포함해서 저장 — ICICPE 연결 데이터                                                            |
-| 형상관리       | 로컬 `venv` + Github                                                 |                                                                                                              |
-| UI             | Gradio·Streamlit → React                                             | 우선순위 낮음                                                                                                |
-
-> 주 머신: MacBook Air M4 (가벼운 로컬 inference·코드 작성용) + Colab GPU (T4 → 필요 시 Pro, 학습·멀티 critic 서빙용)
-> LLM은 API 호출 없이 HuggingFace + vLLM으로 직접 서빙. 파인튜닝은 Unsloth.
-
-_(이 환경 블록은 CLAUDE.md "환경" 섹션에도 동일하게 반영 필요)_
+### 4.4 NoteWriter — Personalized Review Note Writing
 
 ---
 
-## 8. 디렉토리 구조
+The input is the critics' structured, corrected feedback (the Synthesizer's output), and the output is the final review note rewritten in the user's own tone. The MVP reproduces the user's tone through few-shot prompting, using samples of the user's past notes or explanations in the prompt; once enough data accumulates, this shifts to fine-tuning the style itself with Unsloth. This component is completely separate from the critics' judgment logic, and attaches in the same way regardless of which architecture (1, 2, or 3) is used.
+
+→ Learning Goal (5), entire category
+
+### 4.5 Pipeline Flow
+
+---
+
+```mermaid
+flowchart LR
+    Input["User's explanation in English"]
+    HardNeg[("Hard negative set<br/>(injected ground truth)")]
+
+    subgraph AB["A / B — Synchronous, per session (product perspective)"]
+        direction TB
+        A["A: Multi-critic debate + grounding verification<br/>retrieves past skills from SkillBank"]
+        B["B: NoteWriter"]
+        Delivered["Note delivered to the user"]
+        A --> B
+        B --> Delivered
+    end
+
+    subgraph C["C — Batch, once labeled logs accumulate (research perspective)"]
+        direction TB
+        Filter{"Real session:<br/>passes grounding-<br/>confidence filter?"}
+        Distill["Debate log → skill accumulation<br/>optional: Cold-Start SFT + GRPO policy update"]
+        Reflected["Reflected in the next debate"]
+        Discard["Discarded<br/>(served, not distilled)"]
+
+        Filter -->|Yes| Distill
+        Filter -->|No| Discard
+        Distill --> Reflected
+    end
+
+    Input --> A
+    A -->|real session log| Filter
+    HardNeg -->|ground-truth label| Distill
+    Reflected -.->|updated checkpoint| A
+```
+
+A and B run synchronously in every session. C runs as a batch process — but only on **labeled** trajectories. Ground truth comes either from the hard negative set, or from real sessions that pass the grounding-confidence filter (4.3.2). Sessions that fail the filter are served normally but not used for distillation.
+
+---
+
+## 5. Challenges to Understand
+
+### 5.1 How to define and detect disagreement?
+
+---
+
+**(a) Inducing disagreement.** Before we can detect disagreement, disagreement has to exists. Identical critics never disagree, so we deliberately seed variance via the Strict–Merciful persona axis (4.2.2). The goal is to make critics disagree on difficult or ambiguous cases, while still agreeing on clear and correct inputs. If the personas are too different, they may disagree even on obvious cases, leading to unnecessary debate and more false positives. Therefore, choosing an appropriate level of difference between personas is important design consideration.
+
+**(b) Detecting disagreement.** The Orchestrator’s criterion for consensus reached and disagreement found must not be vague. First need to decide whether critics’s evaluations are numeric scores like judged by a threshold difference or text evaluations like requiring a separate judgment model. IF the criterion is too loose, debate is triggered every time, making the round = 0, and the round > 0 comparison meaningless. If it is too strict, on the other hand, cases are almost always treated as consensus, so that we lose the chance to measure the effect of having multiple agents at all.
+
+→ Learning Goal **(1)** "orchestration pattern"
+
+### 5.2 Debate stopping condition — preventing endless debate
+
+---
+
+How does performance change as critics keep debating, and how many rounds is reasonable? We start with a fixed number of rounds to keep the comparison experiments controlled, and later compare this against stopping early, once consensus is reached, or having a judge agent make the final call.
+
+→ Learning Goal **(3)** "multi-agent debate, debate structure", "early stopping"
+
+### 5.3 Negetive test set — method to measure self-sycophancy
+
+---
+
+In order to measure whether a critic is being too complacent, we need a test set with known correct answers that can verify whether the critic actually catches mistakes. So create inputs where a misconception is deliberately injected into user’s explanation, and compare whether the single-prompt critic or the debate-based critic catches it better. This would be how we quantitatively measure the self-sycophancy.
+
+→ Learning Goal **(2)** Causes and solutions of sycophancy — self-critique, debate
+
+### 5.4 Self-labeling on real sessions — where do we trust the grounding?
+
+---
+
+Real user explanations have no ground truth, so we can only distill from them if we can label them automatically. The grounding (RAG) acts as a weak verifier, but this raises three problems:
+
+**(a) Confidence threshold.** How strong must critic consensus and grounding contradiction be before we trust the auto-label? Too loose and we distill from wrong labels (poisoning the SkillBank — see 5.5 "risk of skills biasing the critic"). Too strict and almost nothing gets labeled, so real sessions contribute nothing.
+
+**(b) Selection bias.** Only _clearly grounded_ cases get labeled, so the critic may learn to catch obvious errors well while never learning from hard, ambiguous cases. This bias must be reported as a limitation.
+
+**(c) Verifying the verifier.** To trust the auto-labels at all, a held-out slice of real sessions must be **hand-labeled** and compared against the grounding-based auto-labels, to measure how often the automatic labeler is actually right.
+
+→ Learning Goal (4) "RAG, grounding" / (2) "reinforcement learning, data synthesis"
+
+### 5.5 Additional questions
+
+---
+
+- Handling latency
+  → Learning Goal **(3)** "KV Cache, Flash Attention, Paged Attention", "vLLM, GPU parallelism"
+- Reinforcement Learning Background
+- The risk of skills biasing the critic
+- SkillBank capacity, frequency, recency
+- Serving optimization
+- GPU infrastructure sizing for concurrent critics
+- Synthesizer verdict
+
+---
+
+## 6. Eval Harness Design
+
+### 6.1 Hypotheses
+
+---
+
+- **H1** (corresponds to Question 1): Architecture 2 with debate round ≥ 1 achieves significantly higher hard negative detection accuracy than Architecture 1 with round = 0.
+- **H2** (corresponds to Question 2): As N and R increase, accuracy improves up to a certain point, then plateaus or declines.
+- **H3-a** (accuracy): Adding skill retrieval (S = on) to the optimal structure from H1/H2 improves hard negative detection accuracy over Architecture 2 (S = off).
+- **H3-b** (overhead): Skill retrieval increases input tokens and prefill latency relative to Architecture 2. We quantify this overhead and evaluate whether the accuracy gain justifies it.
+- **H3-c** (efficiency vs. raw trajectory): Compared to injecting the full raw debate trajectory as context, distilled skills reach comparable accuracy at substantially lower token cost. _(This is what SkillRL's compression result supports — skill vs. raw trajectory, not skill vs. no-skill.)_
+
+### 6.2 Comparison Targets
+
+Architecture 1 (Self-Critique), Architecture 2 (Multi-agent Debate), and Architecture 3 (Skill-Augmented Debate) are run on the same input set. In addition, a **single-persona baseline** is included as a separate control — one Strict critic and one Merciful critic, each running alone with no debate. Unlike Architecture 2, which runs the personas together and lets them debate, this baseline isolates whether the accuracy gain comes from the debate/aggregation process itself, or merely from having a strict judge in the pool.
+
+### 6.3 Independent Variables
+
+| Variable                    | Definition                                                                                                                                                | Initial Experiment Range |
+| --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------ |
+| Architecture                | Self-Critique vs. Multi-agent Debate vs. Skill-Augmented Debate                                                                                           | {1, 2, 3}                |
+| Number of debate rounds (K) | Number of rebuttal rounds when critics disagree                                                                                                           | {0, 1, 2, 3}             |
+| Ensemble size (N)           | Number of same-role critics running in parallel, each assigned a distinct persona along the Strict–Merciful axis (N=2: {Strict, Merciful}; N=3: +Neutral) | {1, 2, 3}                |
+| Role diversity (R)          | Number of distinct critic roles (different evaluation targets)                                                                                            | {1, 2}                   |
+| Skill usage (S)             | Whether the critic retrieves and uses skills from the SkillBank                                                                                           | {off, on}                |
+
+### 6.4 Research Progression (Incremental)
+
+---
+
+1. **(baseline)** Measure each persona alone (Strict-only, Merciful-only) with no debate — establishes the "best single persona" bar that debate must beat.
+2. Fix the number of rounds and sweep ensemble size (N) alone — Does adding personas along the Strict-Merciful axis improve over the best single persona?
+3. Fix ensemble size and sweep role diversity (R) alone — "Does adding a different perspective improve accuracy?"
+4. Combine the optimal points from 2 and 3, varying N and R together along with their interaction with debate rounds
+5. On top of the optimal combination from 4, sweep skill usage (S) on/off
+
+### 6.5 Dependent Variables
+
+---
+
+- **Evaluation accuracy** — measured on the Hard Negative test set, as the rate at which intentionally injected misconceptions are caught (recall), plus the rate at which normal explanations are incorrectly flagged (false positive)
+- **Latency** — time from input to the final Synthesizer output (as noted in 4.3.3, this excludes GRPO training time and covers only the inference/retrieval path)
+- **Token usage** — total input and output tokens consumed across the entire pipeline
+
+### 6.6 Datasets
+
+---
+
+1. **Hard Negative test set** — inputs with intentionally injected, plausible misconceptions. Used both to measure critic detection ability and as the source of success/failure labels for Experience Distillation.
+2. **Normal explanation dataset** — normal inputs where the user actually explains (or a synthetic explanation of) course content in English. Used to measure false positives and general latency/token usage.
+
+Both datasets must be paired with the same lecture material used for grounding.
+
+### 6.7 Reproducibility
+
+---
+
+The same input batch is used across every Architecture/K/N/R/S combination for fair comparison. Seeding is **two-level** to reconcile reproducibility with persona diversity:
+
+- A single **master seed** fixes the entire experiment run, so the whole sweep is reproducible end-to-end.
+- Within a run, each critic instance derives its own seed as master_seed + persona_id, so the N critics remain deterministically distinct rather than collapsing to identical outputs.
+
+This way, rerunning with the same master seed reproduces the exact same per-critic behavior, while within any single run the personas stay genuinely diverse. Note that most persona divergence here comes from the **prompt-level** Strict/Merciful framing, not from sampling randomness — the seed scheme mainly guarantees that any remaining stochastic tie-breaks are reproducible.
+
+The SkillBank state which skills were active at a given time is also version-controlled as part of the experimental conditions.
+
+### 6.8 Preserving Debate Logs / SkillBank
+
+---
+
+Each critic's initial evaluation, the content of each rebuttal round, the final consensus, and the hard negative success/failure label are all stored in a structured format as part of the full debate log. This is preserved in full — not just the final score — because this log serves as the input to Experience Distillation and as data that may support future research.
+
+---
+
+## 7. Roadmap
+
+### **Phase 0 — Closing the Loop**
+
+---
+
+Take course content explained in English as input → run it through a single Architecture 1 (Self-Critique) pipeline → produce text output. Since this needs to be comparable with Architecture 2/3 later, the LLM call abstraction layer is built first.
+
+| Step | Description                                                                    | Learning Goal                            |
+| ---- | ------------------------------------------------------------------------------ | ---------------------------------------- |
+| 0-1  | Choose a model (Qwen2.5-7B / Llama-3.1-8B / Mistral-7B) + set up Colab GPU env | (0) GPU, Colab                           |
+| 0-2  | Set up minimal repo skeleton (`pyproject.toml`, `venv`, Github)                | (0) Version control                      |
+| 0-3  | Implement the LLM call abstraction layer                                       | (1) Abstracting LLM calls, prompt design |
+| 0-4  | Implement the Self-Critique pipeline (Architecture 1)                          | (2) Self-critique                        |
+| 0-5  | Implement a minimal version of NoteWriter                                      | (5) Personalization — NoteWriter         |
+| 0-6  | Run the full pipeline end-to-end once via CLI to confirm it works              | — Integration check                      |
+
+### **Phase 1 — Building Multi-agent Debate**
+
+---
+
+Split into Conceptual Critic and Procedural Critic, implement the Orchestrator's consensus/disagreement detection, implement fixed-round debate, and implement structured output (Pydantic) for communication between critics. The schema defined here is designed with the input format for 4.3's Experience Distillation in mind.
+
+| Step | Description                                                                    | Learning Goal                         |
+| ---- | ------------------------------------------------------------------------------ | ------------------------------------- |
+| 1-1  | Learn LangGraph basics + build the graph skeleton                              | (1) LangGraph                         |
+| 1-2  | Define the structured output schema (including fields needed for distillation) | (1) Structured output (Pydantic)      |
+| 1-3  | Implement the Conceptual Critic and Procedural Critic separately               | (1) Separation of concerns            |
+| 1-4  | Implement the Orchestrator's disagreement detection / consensus logic          | (1) Orchestration pattern             |
+| 1-5  | Implement the Debate Round (fixed number of rounds, K)                         | (3) Debate structure                  |
+| 1-6  | Implement the Synthesizer                                                      | — Assembly step                       |
+| 1-7  | Connect the full Architecture 2 pipeline + confirm it works                    | (1) Shared variable / state isolation |
+
+### **Phase 1.5 — Building the Eval Harness**
+
+---
+
+Build the first version of the Hard Negative test set, compare Architecture 1 vs. 2, and run the first N/R/K sweep (step 1 of the research progression).
+
+| Step  | Description                                                                         | Learning Goal                                   |
+| ----- | ----------------------------------------------------------------------------------- | ----------------------------------------------- |
+| 1.5-1 | Build the first version of the Hard Negative test set (with success/failure labels) | (2) Designing critics to detect errors          |
+| 1.5-2 | Build the normal explanation dataset                                                | (2) Data synthesis                              |
+| 1.5-3 | Write code to measure accuracy, latency, and token usage                            | (3) Identifying the causes of inference latency |
+| 1.5-4 | (baseline) Measure each persona alone (Strict-only, Merciful-only, no debate)       | (2) Designing critics to detect errors          |
+| 1.5-5 | Run the Architecture 1 vs. 2 comparison                                             | — Executing research goal 1                     |
+| 1.5-6 | Sweep ensemble size (N) alone — persona-based (Strict/Merciful/Neutral)             | (1) Orchestration pattern                       |
+
+### **Phase 2 — Scaling Up Grounding & Roles**
+
+---
+
+Expand the Content Critic's RAG by separating the retrieval target per critic, and add the Completeness Critic. Run the N/R/K sweep steps 2 (role diversity) and 3 (combined search). The Strict/Merciful axis is kept as the single persona axis through Phase 1.5 to keep the N sweep cleanly interpretable.
+
+| Step | Description                                             | Learning Goal              |
+| ---- | ------------------------------------------------------- | -------------------------- |
+| 2-1  | Build the vector DB, embed lecture materials            | (4) RAG, embedding         |
+| 2-2  | Apply per-critic retrieval target separation            | (4) RAG, grounding         |
+| 2-3  | Add the Completeness Critic                             | (1) Separation of concerns |
+| 2-4  | Sweep role diversity (R) alone                          | (1) Separation of concerns |
+| 2-5  | Search the N × R × K combination space                  | (3) GPU parallelism        |
+| 2-6  | (Optional / research extension) Additional persona axis | (1) Orchestration pattern  |
+
+### **Phase 3 — Skill-Based Self-Improvement & Serving Optimization**
+
+---
+
+On top of the optimal N/R/K combination found in 2-5, build Architecture 3 (Skill-Augmented Debate) and sweep the S (skill usage) axis. Afterward, apply local model serving optimizations and Unsloth fine-tuning. Cold-Start SFT preceded GRPO because SkillRL shows that skipping it makes any S=on result uninterpretable.
+
+| Step  | Description                                                                                   | Learning Goal                      |
+| ----- | --------------------------------------------------------------------------------------------- | ---------------------------------- |
+| 3-0   | Learn reinforcement learning fundamentals (policy, reward, trajectory)                        | (6) RL background                  |
+| 3-1   | Implement the Debate log → Experience Distillation pipeline                                   | (6) Experience distillation        |
+| 3-2   | Build the hierarchical SkillBank (general/task-specific, per critic)                          | (6) Hierarchical skill library     |
+| 3-3   | Integrate skill retrieval                                                                     | (6) Skill retrieval                |
+| 3-4   | Sweep skill usage (S) on/off                                                                  | — Executing research goal 3        |
+| 3-4.5 | Cold-Start SFT: teach the critic to retrieve/apply skills before RL                           | (6) SkillRL Cold-Start             |
+| 3-5   | Strengthen critic policy with GRPO                                                            | (6) GRPO, reward design            |
+| 3-6   | Apply KV Cache, Flash Attention, vLLM                                                         | (3) Serving optimization           |
+| 3-7   | Run GPU parallelism experiments                                                               | (3) GPU parallelism                |
+| 3-8   | Apply Unsloth fine-tuning                                                                     | (2) Unsloth                        |
+| 3-9   | Run post-training / reinforcement learning experiments (reflecting 3-5 results)               | (2) Post-training, RL              |
+| 3-9.5 | (Extension) Grounding-confidence self-labeling on real sessions + hand-label validation slice | (4) grounding / (2) data synthesis |
+| 3-10  | Organize debate log / distillation data (preserved for future research)                       |                                    |
+
+---
+
+## 8. Tech Stack
+
+| Area                         | Choice                                                                | Notes                                                                                                                |
+| ---------------------------- | --------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| Compute environment          | Colab free T4 → Colab Pro if needed                                   | The M4 MacBook is used for light local inference and coding; training and serving multiple critics runs on Colab GPU |
+| Model loading / serving      | HuggingFace Transformers, vLLM                                        | Serving multiple critic instances at once is what makes vLLM's multi-request serving essential                       |
+| Acceleration / optimization  | CUDA, KV Cache, Flash Attention, Paged Attention, GPU parallelism     | Phase 3                                                                                                              |
+| Fine-tuning / alignment      | Unsloth, GRPO, post-training, reinforcement learning (RL)             | Phase 3                                                                                                              |
+| Skill management             | Custom-built SkillBank (separated per critic), semantic retrieval     | Phase 3, based on SAGE/SkillRL                                                                                       |
+| Orchestration                | LangGraph                                                             | Handles parallel critic calls + the Orchestrator + debate round control                                              |
+| RAG                          | Vector DB + lecture materials (retrieval target separated per critic) | Phase 2                                                                                                              |
+| Data synthesis               | Hard Negative test set generation                                     | Phase 1.5                                                                                                            |
+| Containerization / isolation | Docker, Kubernetes if needed                                          | Isolating critic instances and allocating resources                                                                  |
+| Storage                      | SQLite + markdown notes                                               | Includes debate logs                                                                                                 |
+| Version control              | Local `venv` + Github                                                 |                                                                                                                      |
+| UI                           | Gradio / Streamlit → React                                            | Low priority                                                                                                         |
+
+---
+
+## 9. Directory Hierarchy
 
 ```
 fletcher/
@@ -360,62 +630,105 @@ fletcher/
 ├── pyproject.toml
 ├── fletcher/
 │   ├── agents/
-│   │   ├── content_critic/      # Conceptual Critic, Procedural Critic (3.2.1)
-│   │   ├── orchestrator.py      # 합의/충돌 판정(4.2), debate round 트리거(4.3)
+│   │   ├── content_critic/
+│   │   ├── orchestrator.py
 │   │   ├── synthesizer.py
 │   │   └── note_writer.py
 │   ├── architectures/
-│   │   ├── self_critique.py     # Architecture 1 (3.1)
-│   │   └── debate.py            # Architecture 2 (3.2) — R/N/K 설정 가능
+│   │   ├── self_critique.py
+│   │   ├── debate.py
+│   │   └── skill_augmented.py
+│   ├── skills/
+│   │   ├── distillation.py
+│   │   ├── skill_bank.py
+│   │   └── retrieval.py
 │   ├── rag/
-│   │   └── lecture_notes/       # critic별 검색 대상 분리 (4.1)
-│   ├── finetuning/               # Phase 3 — Unsloth, post-training, RL
-│   ├── serving/                  # Phase 3 — vLLM, KV Cache 등 서빙 최적화
+│   │   └── lecture_notes/
+│   ├── finetuning/
+│   ├── serving/
 │   └── pipeline.py
 ├── eval/
 │   ├── datasets/
-│   │   ├── hard_negative/        # 4.4 — 의도적 오개념 주입 데이터셋
-│   │   └── normal/               # false positive·일반 latency 측정용
-│   ├── sweep_configs/            # K/N/R 조합 실험 설정 (5.2)
-│   ├── debate_logs/              # 5.6 — ICICPE 페이퍼 연결 데이터 보존
+│   │   ├── hard_negative/
+│   │   └── normal/
+│   ├── sweep_configs/
+│   ├── debate_logs/
 │   ├── metrics.py
-│   └── run_comparison.py         # Architecture 1 vs 2 비교 (5.1)
-└── ui/
+│   └── run_comparison.py
+└── ui
 ```
+
+| Category             | Path                               | Description                                                     |
+| -------------------- | ---------------------------------- | --------------------------------------------------------------- |
+| **Agents**           | `agents/content_critic/`           | Conceptual Critic, Procedural Critic                            |
+|                      | `agents/orchestrator.py`           | Consensus/disagreement detection, debate round trigger          |
+|                      | `agents/synthesizer.py`            | Combines critic results into a final evaluation                 |
+|                      | `agents/note_writer.py`            | Rewrites the evaluation as a review note in the user's tone     |
+| **Architectures**    | `architectures/self_critique.py`   | Architecture 1                                                  |
+|                      | `architectures/debate.py`          | Architecture 2 (R/N/K configurable)                             |
+|                      | `architectures/skill_augmented.py` | Architecture 3 (S configurable)                                 |
+| **Skills**           | `skills/distillation.py`           | Experience Distillation                                         |
+|                      | `skills/skill_bank.py`             | Hierarchical SkillBank                                          |
+|                      | `skills/retrieval.py`              | Semantic similarity based retrieval                             |
+| **RAG**              | `rag/lecture_notes/`               | Retrieval targets separated per critic                          |
+| **Training/Serving** | `finetuning/`                      | Unsloth, post-training, GRPO                                    |
+|                      | `serving/`                         | vLLM, KV Cache, and other serving optimizations                 |
+| **Eval**             | `eval/datasets/hard_negative/`     | Inputs with intentionally injected misconceptions               |
+|                      | `eval/datasets/normal/`            | For false positive / general latency measurement                |
+|                      | `eval/sweep_configs/`              | K/N/R/S combination experiment configs                          |
+|                      | `eval/debate_logs/`                | Input to Experience Distillation, preserved for future research |
+|                      | `eval/metrics.py`                  | Accuracy/latency/token measurement code                         |
+|                      | `eval/run_comparison.py`           | Compares Architecture 1 vs 2 vs 3                               |
+| **UI**               | `ui/`                              | Gradio/Streamlit → React                                        |
 
 ---
 
-## 9. 진행 현황 체크리스트
+## 10. Progress Checklist
 
-## 9. 진행 현황 체크리스트
-
-- [x] 프로젝트 기획 정리 (피벗: 음성 → 텍스트, sycophancy 프레임 재정의)
-- [x] 아키텍처 설계 (Self-Critique vs Multi-agent Debate, R/N/K 변수 정의)
-- [ ] 0-1. 모델 선택 + Colab GPU 환경 세팅
-- [ ] 0-2. 최소 repo 골격 구성
-- [ ] 0-3. LLM 호출 추상화 레이어 구현
-- [ ] 0-4. Self-Critique 파이프라인 구현
-- [ ] 0-5. NoteWriter 최소 버전 구현
-- [ ] 0-6. 끝단까지 동작 확인
-- [ ] 1-1. LangGraph 기초 학습 + 스켈레톤
-- [ ] 1-2. structured output 스키마 정의
-- [ ] 1-3. Conceptual/Procedural Critic 구현
-- [ ] 1-4. Orchestrator 합의/충돌 판정 구현
-- [ ] 1-5. Debate Round 구현
-- [ ] 1-6. Synthesizer 구현
-- [ ] 1-7. Architecture 2 전체 연결·동작 확인
-- [ ] 1.5-1. Hard Negative 테스트셋 구축
-- [ ] 1.5-2. 정상 설명 데이터셋 구축
-- [ ] 1.5-3. 측정 코드 작성
-- [ ] 1.5-4. Architecture 1 vs 2 비교 실행
-- [ ] 1.5-5. Ensemble 크기(N) 스윕
-- [ ] 2-1. vector DB 구축
-- [ ] 2-2. critic별 검색 대상 분리
-- [ ] 2-3. Completeness Critic 추가
-- [ ] 2-4. 역할 다양성(R) 스윕
-- [ ] 2-5. N×R×K 조합 탐색
-- [ ] 3-1. KV Cache, Flash Attention, vLLM 적용
-- [ ] 3-2. GPU parallelism 실험
-- [ ] 3-3. Unsloth 파인튜닝
-- [ ] 3-4. 사후학습·강화학습 실험
-- [ ] 3-5. ICICPE 토론 로그 정리
+- [x] Project planning finalized
+- [x] Architecture design (Architecture 1/2/3, R/N/K/S variables defined)
+- [x] Design Rationale (3.1–3.5) finalized
+- [x] System Architecture (4.1–4.5) finalized, including mermaid diagrams
+- [x] Challenges to Understand (5.1–5.5) finalized, including RL background as a prerequisite
+- [x] Eval Harness design (6.1–6.8) finalized
+- [x] Roadmap (Phase 0–3) finalized
+- [x] Tech stack finalized
+- [x] Directory structure finalized
+- [x] 0-1. Choose model + set up Colab GPU environment
+- [ ] 0-2. Set up minimal repo skeleton
+- [ ] 0-3. Implement LLM call abstraction layer
+- [ ] 0-4. Implement Self-Critique pipeline
+- [ ] 0-5. Implement minimal NoteWriter
+- [ ] 0-6. Confirm end-to-end pipeline works
+- [ ] 1-1. Learn LangGraph basics + build skeleton
+- [ ] 1-2. Define structured output schema
+- [ ] 1-3. Implement Conceptual/Procedural Critic
+- [ ] 1-4. Implement Orchestrator consensus/disagreement logic
+- [ ] 1-5. Implement Debate Round (fixed number of rounds, K)
+- [ ] 1-6. Implement Synthesizer
+- [ ] 1-7. Connect full Architecture 2 pipeline, confirm it works
+- [ ] 1.5-1. Build Hard Negative test set
+- [ ] 1.5-2. Build normal explanation dataset
+- [ ] 1.5-3. Write measurement code
+- [ ] 1.5-4. (baseline) Measure each persona alone (Strict-only, Merciful-only, no debate)
+- [ ] 1.5-5. Run Architecture 1 vs 2 comparison
+- [ ] 1.5-6. Sweep ensemble size (N) — persona-based (Strict/Merciful/Neutral)
+- [ ] 2-1. Build vector DB
+- [ ] 2-2. Apply per-critic retrieval target separation
+- [ ] 2-3. Add Completeness Critic
+- [ ] 2-4. Sweep role diversity (R)
+- [ ] 2-5. Search N × R × K combination space
+- [ ] 2-6. (Extension) Add second persona axis (Literal/Charitable), test vs. single axis
+- [ ] 3-0. Learn reinforcement learning fundamentals (policy, reward, trajectory)
+- [ ] 3-1. Implement Debate log → Experience Distillation pipeline
+- [ ] 3-2. Build hierarchical SkillBank
+- [ ] 3-3. Integrate skill retrieval
+- [ ] 3-4. Sweep skill usage (S) on/off
+- [ ] 3-4.5. Cold-Start SFT — teach critic to retrieve/apply skills before RL
+- [ ] 3-5. Strengthen critic policy with GRPO
+- [ ] 3-6. Apply KV Cache, Flash Attention, vLLM
+- [ ] 3-7. Run GPU parallelism experiments
+- [ ] 3-8. Apply Unsloth fine-tuning
+- [ ] 3-9. Run post-training / reinforcement learning experiments
+- [ ] 3-9.5. (Extension) Grounding-confidence self-labeling on real sessions + hand-label validation slice
+- [ ] 3-10. Organize debate log / distillation data (preserved for future research)
