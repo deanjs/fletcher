@@ -35,9 +35,13 @@ def evaluate_dataset(
     critic_fn: Callable[[str], tuple[bool, float, int, int, int]],
     run_label: str = "",
     verbose: bool = False,
+    limit: int | None = None,
 ) -> EvalSummary:
     with open(dataset_path) as f:
         dataset = json.load(f)
+
+    if limit is not None:
+        dataset = dataset[:limit]
 
     results = []
 
@@ -63,6 +67,9 @@ def evaluate_dataset(
             llm_calls=llm_calls,
         ))
 
+        if verbose:
+            print(flush=True)
+
     total = len(results)
     correct = sum(r.correct for r in results)
 
@@ -86,3 +93,4 @@ def print_summary(summary: EvalSummary, label: str = "") -> None:
     print(f"avg prompt tokens:     {summary.avg_prompt_tokens:.1f}", flush=True)
     print(f"avg completion tokens: {summary.avg_completion_tokens:.1f}", flush=True)
     print(f"avg llm calls:         {summary.avg_llm_calls:.1f}", flush=True)
+    print(flush=True)

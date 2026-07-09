@@ -19,36 +19,24 @@ def _debate_key(role: str, persona: str) -> str:
     return f"{role}_{persona}"
 
 
-def run_persona_debate(
-    client: LLMClient,
-    persona_list: list[tuple[str, str]],
+def _model_debate_key(role: str, persona: str, label: str) -> str:
+    return f"{role}_{persona}_{label}"
+
+
+def _run_ensemble_debate(
+    critics: dict[str, tuple[str, object]],
     explanation: str,
-    config: GenerationConfig | None = None,
-    retriever: "LectureNoteRetriever | None" = None,
-    max_rounds: int = MAX_PERSONA_ROUNDS,
-    verbose: bool = False,
-    client_per_key: dict[str, LLMClient] | None = None,
+    config: GenerationConfig | None,
+    max_rounds: int,
+    verbose: bool,
+    log_prefix: str,
 ) -> dict:
-    """Run an N-axis debate: several personas of the SAME role evaluate the
+    """Shared Stage-1 engine: N critics sharing the same role evaluate the
     same explanation and, if they disagree, see each other's verdicts and
-    re-evaluate for up to `max_rounds`. This mirrors the R-axis debate in
-    `fletcher.architectures.debate`, but the axis of disagreement is persona
-    (strict/neutral/merciful) rather than role (conceptual/procedural/completeness).
-
-    `client_per_key` optionally maps a debate key (e.g. "conceptual_merciful",
-    see `_debate_key`) to a different LLMClient, so individual personas can be
-    backed by a different model instead of all personas sharing one model.
+    re-evaluate for up to `max_rounds`, stopping early once unanimous.
+    Used both for persona diversity (N-axis) and model diversity (M-axis) —
+    the only difference between the two is how `critics` keys are built.
     """
-    client_per_key = client_per_key or {}
-    critics: dict[str, tuple[str, object]] = {}
-    for role, persona in persona_list:
-        critic_cls = PERSONA_CRITIC_CLASSES.get(role)
-        if critic_cls is None:
-            raise ValueError(f"Unsupported role for persona debate: {role}")
-        key = _debate_key(role, persona)
-        persona_client = client_per_key.get(key, client)
-        critics[key] = (role, critic_cls(persona_client, persona=persona, retriever=retriever))
-
     debate_history: list[dict] = []
     latest_verdicts: dict[str, object] = {}
     total_prompt_tokens = 0
@@ -78,7 +66,7 @@ def run_persona_debate(
 
             if verbose:
                 print(
-                    f"[persona_debate][{key}][round {rounds_run}] "
+                    f"[{log_prefix}][{key}][round {rounds_run}] "
                     f"flagged={verdict.flagged} confidence={verdict.confidence:.2f}",
                     flush=True,
                 )
@@ -105,8 +93,14 @@ def run_persona_debate(
         flags = {v.flagged for v in latest_verdicts.values()}
         if len(flags) == 1:
             if verbose:
-                print(f"[persona_debate] Unanimous after round {rounds_run}, stopping early.", flush=True)
+                print(f"[{log_prefix}] Unanimous after round {rounds_run}, stopping early.", flush=True)
             break
+
+        if verbose:
+            print(flush=True)
+
+    if verbose:
+        print(flush=True)
 
     flagged_count = sum(1 for v in latest_verdicts.values() if v.flagged)
     not_flagged_count = len(latest_verdicts) - flagged_count
@@ -120,3 +114,71 @@ def run_persona_debate(
         "llm_calls": total_llm_calls,
         "debate_history": debate_history,
     }
+
+
+def run_persona_debate(
+    client: LLMClient,
+    persona_list: list[tuple[str, str]],
+    explanation: str,
+    config: GenerationConfig | None = None,
+    retriever: "LectureNoteRetriever | None" = None,
+    max_rounds: int = MAX_PERSONA_ROUNDS,
+    verbose: bool = False,
+    client_per_key: dict[str, LLMClient] | None = None,
+) -> dict:
+    """N-axis Stage-1 debate: several PERSONAS of the SAME role, SAME model
+    by default, evaluate the same explanation and debate for up to
+    `max_rounds` if they disagree.
+
+    `client_per_key` optionally overrides the model for one debate key (e.g.
+    "conceptual_merciful") — kept only for backward compatibility / ad-hoc
+    experiments. For a controlled model-diversity study use
+    `run_model_debate` instead, which holds persona fixed so the model is the
+    only thing that varies.
+    """
+    client_per_key = client_per_key or {}
+    critics: dict[str, tuple[str, object]] = {}
+    for role, persona in persona_list:
+        critic_cls = PERSONA_CRITIC_CLASSES.get(role)
+        if critic_cls is None:
+            raise ValueError(f"Unsupported role for persona debate: {role}")
+        key = _debate_key(role, persona)
+        persona_client = client_per_key.get(key, client)
+        critics[key] = (role, critic_cls(persona_client, persona=persona, retriever=retriever))
+
+    return _run_ensemble_debate(
+        critics, explanation, config, max_rounds, verbose, log_prefix="persona_debate"
+    )
+
+
+def run_model_debate(
+    role: str,
+    persona: str,
+    client_list: list[tuple[str, LLMClient]],
+    explanation: str,
+    config: GenerationConfig | None = None,
+    retriever: "LectureNoteRetriever | None" = None,
+    max_rounds: int = MAX_PERSONA_ROUNDS,
+    verbose: bool = False,
+) -> dict:
+    """M-axis Stage-1 debate: several MODELS evaluate the SAME role with the
+    SAME (fixed) persona, and debate for up to `max_rounds` if they disagree.
+    This isolates model diversity from persona diversity — the only thing
+    that varies between critics here is which weights are answering.
+
+    `client_list` is a list of (label, LLMClient) pairs, e.g.
+    [("qwen", qwen_client), ("llama", llama_client)]. Labels only need to be
+    unique within the call; they show up in verbose logs and debate_history.
+    """
+    critic_cls = PERSONA_CRITIC_CLASSES.get(role)
+    if critic_cls is None:
+        raise ValueError(f"Unsupported role for model debate: {role}")
+
+    critics: dict[str, tuple[str, object]] = {}
+    for label, model_client in client_list:
+        key = _model_debate_key(role, persona, label)
+        critics[key] = (role, critic_cls(model_client, persona=persona, retriever=retriever))
+
+    return _run_ensemble_debate(
+        critics, explanation, config, max_rounds, verbose, log_prefix="model_debate"
+    )
