@@ -244,8 +244,8 @@ class DebateState(TypedDict):
     active_roles: list
 
 
-def make_conceptual_critic_node(client: LLMClient):
-    critic = ConceptualCritic(client)
+def make_conceptual_critic_node(client: LLMClient, persona: str = "neutral"):
+    critic = ConceptualCritic(client, persona=persona)
 
     def node(state: DebateState) -> dict:
         verdict = critic.evaluate(state["explanation"])
@@ -254,8 +254,8 @@ def make_conceptual_critic_node(client: LLMClient):
     return node
 
 
-def make_procedural_critic_node(client: LLMClient):
-    critic = ProceduralCritic(client)
+def make_procedural_critic_node(client: LLMClient, persona: str = "neutral"):
+    critic = ProceduralCritic(client, persona=persona)
 
     def node(state: DebateState) -> dict:
         verdict = critic.evaluate(state["explanation"])
@@ -321,8 +321,10 @@ def build_debate_graph(
     client: LLMClient,
     retriever: LectureNoteRetriever | None = None,
     roles: list[str] | None = None,
+    personas: dict[str, str] | None = None,
 ):
     roles = roles or ALL_ROLES
+    personas = personas or {role: "neutral" for role in roles}
 
     if "completeness" in roles:
         assert retriever is not None, "retriever is required when completeness role is included"
@@ -332,9 +334,9 @@ def build_debate_graph(
     # add critic nodes
     for role in roles:
         if role == "conceptual":
-            graph.add_node("conceptual_critic", make_conceptual_critic_node(client))
+            graph.add_node("conceptual_critic", make_conceptual_critic_node(client, personas.get("conceptual", "neutral")))
         elif role == "procedural":
-            graph.add_node("procedural_critic", make_procedural_critic_node(client))
+            graph.add_node("procedural_critic", make_procedural_critic_node(client, personas.get("procedural", "neutral")))
         elif role == "completeness":
             graph.add_node("completeness_critic", make_completeness_critic_node(client, retriever))
 

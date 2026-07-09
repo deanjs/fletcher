@@ -4,19 +4,36 @@ from fletcher.llm.client import GenerationConfig, LLMClient
 from fletcher.llm.message import Message
 from fletcher.agents.schemas import CriticVerdict
 
+PERSONA_PROMPTS = {
+    "strict": (
+        "Be highly critical. Flag any potential procedural issues, even minor ones. "
+        "When in doubt, flag it."
+    ),
+    "merciful": (
+        "Only flag clear and significant procedural errors. "
+        "Ignore minor imprecisions or incomplete but not incorrect steps."
+    ),
+    "neutral": "",
+}
+
 
 class ProceduralCritic:
-    def __init__(self, client: LLMClient):
+    def __init__(self, client: LLMClient, persona: str = "neutral"):
         self.client = client
+        self.persona = persona
 
     def evaluate(self, explanation: str, config: GenerationConfig | None = None) -> CriticVerdict:
+        persona_instruction = PERSONA_PROMPTS.get(self.persona, "")
+        persona_line = f" {persona_instruction}" if persona_instruction else ""
+
         messages = [
             Message(
                 role="system",
                 content=(
                     "You are a procedural fidelity critic for a computer science course. "
                     "Evaluate ONLY whether the steps and order of applying a concept are "
-                    "logically correct. Do not evaluate whether definitions are correct.\n\n"
+                    "logically correct. Do not evaluate whether definitions are correct."
+                    f"{persona_line}\n\n"
                     "Respond with ONLY a JSON object in this exact format, no other text:\n"
                     '{"flagged": true or false, "confidence": 0.0 to 1.0, "reasoning": "..."}'
                 ),
@@ -37,7 +54,7 @@ class ProceduralCritic:
             start = text.find("{")
             end = text.rfind("}")
             if start == -1 or end == -1:
-                raise ValueError(f"Could not find JSON object in critic output:\n{text}")
+                raise ValueError(f"Could not find JSON in critic output:\n{text}")
             data = json.loads(text[start:end + 1])
 
         return CriticVerdict(role="procedural", **data)

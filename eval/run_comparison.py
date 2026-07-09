@@ -266,6 +266,8 @@ from fletcher.architectures.self_critique import SelfCritique
 from fletcher.architectures.debate import build_debate_graph
 from fletcher.rag.lecture_notes.retriever import LectureNoteRetriever
 from eval.metrics import evaluate_dataset, print_summary
+from collections import Counter
+
 
 HARD_NEGATIVE_PATH = Path(__file__).parent / "datasets/hard_negative/hard_negatives.json"
 NORMAL_PATH = Path(__file__).parent / "datasets/normal/normal_explanations.json"
@@ -277,6 +279,15 @@ ROLE_CONFIGS = {
     "R2_conceptual_procedural":   ["conceptual", "procedural"],
     "R2_conceptual_completeness": ["conceptual", "completeness"],
     "R3_all":                     ["conceptual", "procedural", "completeness"],
+}
+
+
+PERSONA_CONFIGS = {
+    "N1_neutral":         [("conceptual", "neutral")],
+    "N1_strict":          [("conceptual", "strict")],
+    "N1_merciful":        [("conceptual", "merciful")],
+    "N2_strict_merciful": [("conceptual", "strict"), ("conceptual", "merciful")],
+    "N3_all_personas":    [("conceptual", "strict"), ("conceptual", "neutral"), ("conceptual", "merciful")],
 }
 
 K_VALUES = [1, 3, 5]
@@ -324,6 +335,30 @@ def make_arch2_critic_fn(client, retriever, roles):
 
     return critic_fn
 
+def make_n_sweep_critic_fn(client, persona_list):
+    def critic_fn(explanation: str):
+        votes = []
+        total_latency = 0.0
+
+        for role, persona in persona_list:
+            if role == "conceptual":
+                from fletcher.agents.content_critic.conceptual import ConceptualCritic
+                critic = ConceptualCritic(client, persona=persona)
+            elif role == "procedural":
+                from fletcher.agents.content_critic.procedural import ProceduralCritic
+                critic = ProceduralCritic(client, persona=persona)
+
+            start = time.perf_counter()
+            verdict = critic.evaluate(explanation)
+            total_latency += (time.perf_counter() - start) * 1000
+            votes.append(verdict.flagged)
+
+        # majority vote
+        flagged = Counter(votes).most_common(1)[0][0]
+        return flagged, total_latency, 0, 0, len(persona_list)
+
+    return critic_fn
+
 
 def run(backend: str = "hf"):
     client = create_llm_client(backend)
@@ -354,6 +389,15 @@ def run(backend: str = "hf"):
         print_summary(evaluate_dataset(str(HARD_NEGATIVE_PATH), fn), label="Hard Negative")
         print_summary(evaluate_dataset(str(NORMAL_PATH), fn), label="Normal")
 
+    # N sweep 
+    print("\n=== Architecture 2 — N Sweep (persona-based, R=conceptual only) ===")
+    for config_name, persona_list in PERSONA_CONFIGS.items():
+        print(f"\n--- {config_name} ---")
+        fn = make_n_sweep_critic_fn(client, persona_list)
+        hn = evaluate_dataset(str(HARD_NEGATIVE_PATH), fn)
+        print_summary(hn, label="Hard Negative")
+        normal = evaluate_dataset(str(NORMAL_PATH), fn)
+        print_summary(normal, label="Normal")
 
 if __name__ == "__main__":
     run()
