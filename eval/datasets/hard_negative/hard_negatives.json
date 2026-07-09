@@ -1,37 +1,37 @@
 [
   {
     "id": "hn_001",
-    "topic": "hash table",
-    "explanation": "A hash table stores values sequentially in memory. To find a value, you scan through the array from the beginning until you find the matching key.",
-    "injected_error": "Hash tables do not store values sequentially, and lookup is O(1) via hash function, not O(n) sequential scan.",
+    "topic": "attention mechanism",
+    "explanation": "The attention mechanism works by having each token look only at the token immediately before it, passing information forward one step at a time.",
+    "injected_error": "Attention computes relationships between all pairs of tokens simultaneously, not just adjacent ones.",
     "label": true
   },
   {
     "id": "hn_002",
-    "topic": "hash table",
-    "explanation": "A hash table converts keys into array indices using a hash function. When two keys produce the same index, the second value simply overwrites the first one.",
-    "injected_error": "Collision handling is not overwriting. Correct methods are chaining or open addressing.",
+    "topic": "transformer architecture",
+    "explanation": "The Transformer processes input tokens sequentially one by one, similar to an RNN. This allows it to maintain order information naturally without any additional encoding.",
+    "injected_error": "Transformers process all tokens in parallel. Positional encodings are needed precisely because there is no sequential processing.",
     "label": true
   },
   {
     "id": "hn_003",
-    "topic": "linked list",
-    "explanation": "In a linked list, each node stores a value and a pointer to the previous node. To traverse the list, you start from the tail and follow pointers backward to the head.",
-    "injected_error": "A singly linked list points forward (to next node), not backward. Traversal goes from head to tail, not tail to head.",
+    "topic": "large language models",
+    "explanation": "LLMs generate text by always selecting the single highest-probability token at every step, which guarantees the most fluent and accurate output.",
+    "injected_error": "Greedy decoding does not guarantee best output. Sampling strategies like temperature, top-p, and beam search exist for this reason.",
     "label": true
   },
   {
     "id": "hn_004",
-    "topic": "binary search",
-    "explanation": "Binary search works on any array by repeatedly picking a random element and checking if it matches the target. This gives O(log n) performance on average.",
-    "injected_error": "Binary search requires a sorted array and always picks the middle element, not a random one. Random picking does not guarantee O(log n).",
+    "topic": "RLHF",
+    "explanation": "In RLHF, the language model is directly fine-tuned using human ratings as a loss function, without any intermediate reward model.",
+    "injected_error": "RLHF requires training a separate reward model on human preference data first, then using RL to optimize the LLM against that reward model.",
     "label": true
   },
   {
     "id": "hn_005",
-    "topic": "stack",
-    "explanation": "A stack is a data structure where you can insert and remove elements from both ends. The element inserted first is the first one to be removed.",
-    "injected_error": "A stack only allows insertion and removal from one end (top), following LIFO order, not FIFO. FIFO describes a queue.",
+    "topic": "word embeddings",
+    "explanation": "Word embeddings assign a fixed vector to each word regardless of context, so the word 'bank' always has the same representation whether it means a financial institution or a river bank.",
+    "injected_error": "This describes static embeddings like Word2Vec. Contextual embeddings (used in Transformers) produce different representations for the same word depending on context.",
     "label": true
   }
 ]

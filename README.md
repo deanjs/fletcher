@@ -695,7 +695,7 @@ fletcher/
 - [x] Tech stack finalized
 - [x] Directory structure finalized
 - [x] 0-1. Choose model + set up Colab GPU environment
-- [ ] 0-2. Set up minimal repo skeleton
+- [x] 0-2. Set up minimal repo skeleton
 - [ ] 0-3. Implement LLM call abstraction layer
 - [ ] 0-4. Implement Self-Critique pipeline
 - [ ] 0-5. Implement minimal NoteWriter

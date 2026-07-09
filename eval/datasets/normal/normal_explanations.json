@@ -1,32 +1,32 @@
 [
   {
     "id": "normal_001",
-    "topic": "hash table",
-    "explanation": "A hash table stores key-value pairs by converting each key into an array index using a hash function. When two keys produce the same index, collisions are handled using chaining, where each index holds a linked list of entries.",
+    "topic": "attention mechanism",
+    "explanation": "The attention mechanism computes a weighted sum of value vectors, where the weights are determined by the similarity between query and key vectors using scaled dot-product, followed by a softmax normalization.",
     "label": false
   },
   {
     "id": "normal_002",
-    "topic": "hash table",
-    "explanation": "A hash table uses a hash function to map keys to indices in an underlying array. Collision resolution strategies like open addressing probe for the next available slot when a collision occurs.",
+    "topic": "transformer architecture",
+    "explanation": "The Transformer architecture processes all input tokens in parallel using self-attention layers. Positional encodings are added to token embeddings to inject information about the order of tokens in the sequence.",
     "label": false
   },
   {
     "id": "normal_003",
-    "topic": "linked list",
-    "explanation": "A singly linked list consists of nodes where each node holds a value and a pointer to the next node. Traversal starts at the head and follows pointers until reaching a node whose next pointer is null.",
+    "topic": "large language models",
+    "explanation": "LLMs generate text autoregressively by predicting the next token given all previous tokens. Sampling strategies such as temperature scaling and top-p sampling control the randomness and diversity of the generated output.",
     "label": false
   },
   {
     "id": "normal_004",
-    "topic": "binary search",
-    "explanation": "Binary search requires a sorted array. It works by repeatedly comparing the target value to the middle element, then discarding the half that cannot contain the target. This achieves O(log n) time complexity.",
+    "topic": "RLHF",
+    "explanation": "RLHF fine-tunes a language model using human preference data. First, a reward model is trained on human comparisons of model outputs. Then, the LLM is optimized using reinforcement learning to maximize the reward model's score.",
     "label": false
   },
   {
     "id": "normal_005",
-    "topic": "stack",
-    "explanation": "A stack is a LIFO data structure where elements are inserted and removed only from the top. Push adds an element to the top, and pop removes the most recently added element.",
+    "topic": "word embeddings",
+    "explanation": "Word embeddings represent words as dense vectors in a high-dimensional space such that semantically similar words are close together. Transformer-based models produce contextual embeddings where the same word can have different representations depending on its surrounding context.",
     "label": false
   }
 ]
