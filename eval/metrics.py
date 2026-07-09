@@ -15,6 +15,7 @@ class EvalResult:
     latency_ms: float
     prompt_tokens: int
     completion_tokens: int
+    llm_calls: int
 
 
 @dataclass
@@ -25,31 +26,21 @@ class EvalSummary:
     avg_latency_ms: float
     avg_prompt_tokens: float
     avg_completion_tokens: float
+    avg_llm_calls: float
     results: list[EvalResult] = field(default_factory=list)
 
 
 def evaluate_dataset(
     dataset_path: str,
-    critic_fn: Callable[[str], tuple[bool, float, int, int]],
+    critic_fn: Callable[[str], tuple[bool, float, int, int, int]],
 ) -> EvalSummary:
-    """
-    Evaluate a critic function against a dataset.
-
-    Args:
-        dataset_path: path to JSON dataset file
-        critic_fn: function that takes an explanation string and returns
-                   (flagged: bool, latency_ms: float, prompt_tokens: int, completion_tokens: int)
-
-    Returns:
-        EvalSummary with accuracy, latency, and token usage stats
-    """
     with open(dataset_path) as f:
         dataset = json.load(f)
 
     results = []
 
     for item in dataset:
-        flagged, latency_ms, prompt_tokens, completion_tokens = critic_fn(item["explanation"])
+        flagged, latency_ms, prompt_tokens, completion_tokens, llm_calls = critic_fn(item["explanation"])
 
         results.append(EvalResult(
             id=item["id"],
@@ -60,6 +51,7 @@ def evaluate_dataset(
             latency_ms=latency_ms,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
+            llm_calls=llm_calls,
         ))
 
     total = len(results)
@@ -72,6 +64,7 @@ def evaluate_dataset(
         avg_latency_ms=sum(r.latency_ms for r in results) / total,
         avg_prompt_tokens=sum(r.prompt_tokens for r in results) / total,
         avg_completion_tokens=sum(r.completion_tokens for r in results) / total,
+        avg_llm_calls=sum(r.llm_calls for r in results) / total,
         results=results,
     )
 
@@ -83,3 +76,4 @@ def print_summary(summary: EvalSummary, label: str = "") -> None:
     print(f"avg latency:           {summary.avg_latency_ms:.1f} ms")
     print(f"avg prompt tokens:     {summary.avg_prompt_tokens:.1f}")
     print(f"avg completion tokens: {summary.avg_completion_tokens:.1f}")
+    print(f"avg llm calls:         {summary.avg_llm_calls:.1f}")
