@@ -44,7 +44,7 @@ class HFLocalClient(LLMClient):
             max_new_tokens=config.max_new_tokens,
             temperature=config.temperature,
             top_p=config.top_p,
-            do_sample=True,
+            do_sample=False,
         )
         latency_ms = (time.perf_counter() - start) * 1000
 

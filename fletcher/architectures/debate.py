@@ -1,233 +1,15 @@
-# from typing import TypedDict
-# from langgraph.graph import StateGraph, END
+from typing import TYPE_CHECKING, TypedDict
 
-# from fletcher.agents.schemas import CriticVerdict
-# from fletcher.agents.content_critic.conceptual import ConceptualCritic
-# from fletcher.agents.content_critic.procedural import ProceduralCritic
-# from fletcher.llm.client import LLMClient
+from langgraph.graph import END, StateGraph
 
-# MAX_ROUNDS = 2
-
-
-# class DebateState(TypedDict):
-#     explanation: str
-#     conceptual_verdict: dict
-#     procedural_verdict: dict
-#     issue_found: bool
-#     round: int
-#     final_result: str
-
-
-# def make_conceptual_critic_node(client: LLMClient):
-#     critic = ConceptualCritic(client)
-
-#     def node(state: DebateState) -> dict:
-#         verdict = critic.evaluate(state["explanation"])
-#         return {"conceptual_verdict": verdict.model_dump()}
-
-#     return node
-
-
-# def make_procedural_critic_node(client: LLMClient):
-#     critic = ProceduralCritic(client)
-
-#     def node(state: DebateState) -> dict:
-#         verdict = critic.evaluate(state["explanation"])
-#         return {"procedural_verdict": verdict.model_dump()}
-
-#     return node
-
-
-# def orchestrator_node(state: DebateState) -> dict:
-#     conceptual = CriticVerdict(**state["conceptual_verdict"])
-#     procedural = CriticVerdict(**state["procedural_verdict"])
-
-#     issue_found = conceptual.flagged or procedural.flagged
-
-#     return {"issue_found": issue_found}
-
-
-# def debate_round_node(state: DebateState) -> dict:
-#     return {"round": state["round"] + 1}
-
-
-# def route_after_orchestrator(state: DebateState) -> str:
-#     if state["issue_found"] and state["round"] < MAX_ROUNDS:
-#         return "debate_round"
-#     return "synthesizer"
-
-
-# def synthesizer_node(state: DebateState) -> dict:
-#     conceptual = CriticVerdict(**state["conceptual_verdict"])
-#     procedural = CriticVerdict(**state["procedural_verdict"])
-
-#     parts = []
-#     if conceptual.flagged:
-#         parts.append(f"Conceptual issue: {conceptual.reasoning}")
-#     if procedural.flagged:
-#         parts.append(f"Procedural issue: {procedural.reasoning}")
-
-#     if not parts:
-#         final_result = "No issues found. The explanation is accurate."
-#     else:
-#         final_result = " ".join(parts)
-
-#     return {"final_result": final_result}
-
-
-# def build_debate_graph(client: LLMClient):
-#     graph = StateGraph(DebateState)
-
-#     graph.add_node("conceptual_critic", make_conceptual_critic_node(client))
-#     graph.add_node("procedural_critic", make_procedural_critic_node(client))
-#     graph.add_node("orchestrator", orchestrator_node)
-#     graph.add_node("debate_round", debate_round_node)
-#     graph.add_node("synthesizer", synthesizer_node)
-
-#     graph.set_entry_point("conceptual_critic")
-#     graph.add_edge("conceptual_critic", "procedural_critic")
-#     graph.add_edge("procedural_critic", "orchestrator")
-
-#     graph.add_conditional_edges(
-#         "orchestrator",
-#         route_after_orchestrator,
-#         {"debate_round": "debate_round", "synthesizer": "synthesizer"},
-#     )
-
-#     graph.add_edge("debate_round", "conceptual_critic")
-#     graph.add_edge("synthesizer", END)
-
-#     return graph.compile()
-
-# from typing import TypedDict
-# from langgraph.graph import StateGraph, END
-
-# from fletcher.agents.schemas import CriticVerdict
-# from fletcher.agents.content_critic.conceptual import ConceptualCritic
-# from fletcher.agents.content_critic.procedural import ProceduralCritic
-# from fletcher.agents.content_critic.completeness import CompletenessCritic
-# from fletcher.llm.client import LLMClient
-# from fletcher.rag.lecture_notes.retriever import LectureNoteRetriever
-
-# MAX_ROUNDS = 2
-
-
-# class DebateState(TypedDict):
-#     explanation: str
-#     conceptual_verdict: dict
-#     procedural_verdict: dict
-#     completeness_verdict: dict
-#     issue_found: bool
-#     round: int
-#     final_result: str
-
-
-# def make_conceptual_critic_node(client: LLMClient):
-#     critic = ConceptualCritic(client)
-
-#     def node(state: DebateState) -> dict:
-#         verdict = critic.evaluate(state["explanation"])
-#         return {"conceptual_verdict": verdict.model_dump()}
-
-#     return node
-
-
-# def make_procedural_critic_node(client: LLMClient):
-#     critic = ProceduralCritic(client)
-
-#     def node(state: DebateState) -> dict:
-#         verdict = critic.evaluate(state["explanation"])
-#         return {"procedural_verdict": verdict.model_dump()}
-
-#     return node
-
-
-# def make_completeness_critic_node(client: LLMClient, retriever: LectureNoteRetriever):
-#     critic = CompletenessCritic(client, retriever)
-
-#     def node(state: DebateState) -> dict:
-#         verdict = critic.evaluate(state["explanation"])
-#         return {"completeness_verdict": verdict.model_dump()}
-
-#     return node
-
-
-# def orchestrator_node(state: DebateState) -> dict:
-#     conceptual = CriticVerdict(**state["conceptual_verdict"])
-#     procedural = CriticVerdict(**state["procedural_verdict"])
-#     completeness = CriticVerdict(**state["completeness_verdict"])
-
-#     issue_found = conceptual.flagged or procedural.flagged or completeness.flagged
-
-#     return {"issue_found": issue_found}
-
-
-# def debate_round_node(state: DebateState) -> dict:
-#     return {"round": state["round"] + 1}
-
-
-# def route_after_orchestrator(state: DebateState) -> str:
-#     if state["issue_found"] and state["round"] < MAX_ROUNDS:
-#         return "debate_round"
-#     return "synthesizer"
-
-
-# def synthesizer_node(state: DebateState) -> dict:
-#     conceptual = CriticVerdict(**state["conceptual_verdict"])
-#     procedural = CriticVerdict(**state["procedural_verdict"])
-#     completeness = CriticVerdict(**state["completeness_verdict"])
-
-#     parts = []
-#     if conceptual.flagged:
-#         parts.append(f"Conceptual issue: {conceptual.reasoning}")
-#     if procedural.flagged:
-#         parts.append(f"Procedural issue: {procedural.reasoning}")
-#     if completeness.flagged:
-#         parts.append(f"Completeness issue: {completeness.reasoning}")
-
-#     if not parts:
-#         final_result = "No issues found. The explanation is accurate and complete."
-#     else:
-#         final_result = " ".join(parts)
-
-#     return {"final_result": final_result}
-
-
-# def build_debate_graph(client: LLMClient, retriever: LectureNoteRetriever):
-#     graph = StateGraph(DebateState)
-
-#     graph.add_node("conceptual_critic", make_conceptual_critic_node(client))
-#     graph.add_node("procedural_critic", make_procedural_critic_node(client))
-#     graph.add_node("completeness_critic", make_completeness_critic_node(client, retriever))
-#     graph.add_node("orchestrator", orchestrator_node)
-#     graph.add_node("debate_round", debate_round_node)
-#     graph.add_node("synthesizer", synthesizer_node)
-
-#     graph.set_entry_point("conceptual_critic")
-#     graph.add_edge("conceptual_critic", "procedural_critic")
-#     graph.add_edge("procedural_critic", "completeness_critic")
-#     graph.add_edge("completeness_critic", "orchestrator")
-
-#     graph.add_conditional_edges(
-#         "orchestrator",
-#         route_after_orchestrator,
-#         {"debate_round": "debate_round", "synthesizer": "synthesizer"},
-#     )
-
-#     graph.add_edge("debate_round", "conceptual_critic")
-#     graph.add_edge("synthesizer", END)
-
-#     return graph.compile()
-
-from typing import TypedDict
-from langgraph.graph import StateGraph, END
-
-from fletcher.agents.schemas import CriticVerdict
 from fletcher.agents.content_critic.conceptual import ConceptualCritic
 from fletcher.agents.content_critic.procedural import ProceduralCritic
-from fletcher.agents.content_critic.completeness import CompletenessCritic
-from fletcher.llm.client import LLMClient
-from fletcher.rag.lecture_notes.retriever import LectureNoteRetriever
+from fletcher.agents.schemas import CriticVerdict
+from fletcher.llm.client import GenerationConfig, LLMClient
+
+if TYPE_CHECKING:
+    from fletcher.rag.lecture_notes.retriever import LectureNoteRetriever
+
 
 MAX_ROUNDS = 2
 ALL_ROLES = ["conceptual", "procedural", "completeness"]
@@ -238,38 +20,151 @@ class DebateState(TypedDict):
     conceptual_verdict: dict
     procedural_verdict: dict
     completeness_verdict: dict
+    conceptual_debate_text: str
+    procedural_debate_text: str
+    completeness_debate_text: str
     issue_found: bool
     round: int
     final_result: str
-    active_roles: list
+    active_roles: list[str]
+    debate_history: list[dict]
+    total_prompt_tokens: int
+    total_completion_tokens: int
+    total_llm_calls: int
 
 
-def make_conceptual_critic_node(client: LLMClient, persona: str = "neutral"):
-    critic = ConceptualCritic(client, persona=persona)
+def make_conceptual_critic_node(
+    client: LLMClient,
+    persona: str = "neutral",
+    retriever: "LectureNoteRetriever | None" = None,
+    config: GenerationConfig | None = None,
+):
+    critic = ConceptualCritic(client, persona=persona, retriever=retriever)
 
     def node(state: DebateState) -> dict:
-        verdict = critic.evaluate(state["explanation"])
-        return {"conceptual_verdict": verdict.model_dump()}
+        debate_history = state.get("debate_history", [])
+        verdict = critic.evaluate(
+            state["explanation"],
+            config=config,
+            debate_history=debate_history,
+        )
+        debate_text = critic.compose_debate_turn(
+            state["explanation"],
+            verdict,
+            debate_history=debate_history,
+            config=config,
+        )
+        response = critic.last_response
+        debate_response = critic.last_debate_response
+        prompt_tokens = 0
+        completion_tokens = 0
+        llm_calls = 0
+        if response:
+            prompt_tokens += response.prompt_tokens
+            completion_tokens += response.completion_tokens
+            llm_calls += 1
+        if debate_response:
+            prompt_tokens += debate_response.prompt_tokens
+            completion_tokens += debate_response.completion_tokens
+            llm_calls += 1
+        return {
+            "conceptual_verdict": verdict.model_dump(),
+            "conceptual_debate_text": debate_text,
+            "total_prompt_tokens": state["total_prompt_tokens"] + prompt_tokens,
+            "total_completion_tokens": state["total_completion_tokens"] + completion_tokens,
+            "total_llm_calls": state["total_llm_calls"] + llm_calls,
+        }
 
     return node
 
 
-def make_procedural_critic_node(client: LLMClient, persona: str = "neutral"):
-    critic = ProceduralCritic(client, persona=persona)
+def make_procedural_critic_node(
+    client: LLMClient,
+    persona: str = "neutral",
+    retriever: "LectureNoteRetriever | None" = None,
+    config: GenerationConfig | None = None,
+):
+    critic = ProceduralCritic(client, persona=persona, retriever=retriever)
 
     def node(state: DebateState) -> dict:
-        verdict = critic.evaluate(state["explanation"])
-        return {"procedural_verdict": verdict.model_dump()}
+        debate_history = state.get("debate_history", [])
+        verdict = critic.evaluate(
+            state["explanation"],
+            config=config,
+            debate_history=debate_history,
+        )
+        debate_text = critic.compose_debate_turn(
+            state["explanation"],
+            verdict,
+            debate_history=debate_history,
+            config=config,
+        )
+        response = critic.last_response
+        debate_response = critic.last_debate_response
+        prompt_tokens = 0
+        completion_tokens = 0
+        llm_calls = 0
+        if response:
+            prompt_tokens += response.prompt_tokens
+            completion_tokens += response.completion_tokens
+            llm_calls += 1
+        if debate_response:
+            prompt_tokens += debate_response.prompt_tokens
+            completion_tokens += debate_response.completion_tokens
+            llm_calls += 1
+        return {
+            "procedural_verdict": verdict.model_dump(),
+            "procedural_debate_text": debate_text,
+            "total_prompt_tokens": state["total_prompt_tokens"] + prompt_tokens,
+            "total_completion_tokens": state["total_completion_tokens"] + completion_tokens,
+            "total_llm_calls": state["total_llm_calls"] + llm_calls,
+        }
 
     return node
 
 
-def make_completeness_critic_node(client: LLMClient, retriever: LectureNoteRetriever):
+def make_completeness_critic_node(
+    client: LLMClient,
+    retriever: "LectureNoteRetriever",
+    config: GenerationConfig | None = None,
+):
+    from fletcher.agents.content_critic.completeness import CompletenessCritic
+
     critic = CompletenessCritic(client, retriever)
 
     def node(state: DebateState) -> dict:
-        verdict = critic.evaluate(state["explanation"])
-        return {"completeness_verdict": verdict.model_dump()}
+        debate_history = state.get("debate_history", [])
+        verdict = critic.evaluate(
+            state["explanation"],
+            config=config,
+            debate_history=debate_history,
+        )
+        debate_text = critic.compose_debate_turn(
+            state["explanation"],
+            verdict,
+            debate_history=debate_history,
+            config=config,
+        )
+        response = critic.last_response
+        debate_response = critic.last_debate_response
+        prompt_tokens = 0
+        completion_tokens = 0
+        llm_calls = 0
+        if response:
+            prompt_tokens += response.prompt_tokens
+            completion_tokens += response.completion_tokens
+            llm_calls += 1
+        if debate_response:
+            prompt_tokens += debate_response.prompt_tokens
+            completion_tokens += debate_response.completion_tokens
+            llm_calls += 1
+        return {
+            "completeness_verdict": verdict.model_dump(),
+            "completeness_debate_text": debate_text,
+            "total_prompt_tokens": state["total_prompt_tokens"] + prompt_tokens,
+            "total_completion_tokens": state["total_completion_tokens"] + completion_tokens,
+            "total_llm_calls": state["total_llm_calls"] + llm_calls,
+        }
 
     return node
 
@@ -285,11 +180,15 @@ def make_orchestrator_node(roles: list[str]):
                     issue_found = True
                     break
         return {"issue_found": issue_found}
+
     return node
 
 
 def debate_round_node(state: DebateState) -> dict:
-    return {"round": state["round"] + 1}
+    return {
+        "round": state["round"] + 1,
+        "debate_history": [*state.get("debate_history", []), _build_round_entry(state)],
+    }
 
 
 def route_after_orchestrator(state: DebateState) -> str:
@@ -300,6 +199,11 @@ def route_after_orchestrator(state: DebateState) -> str:
 
 def make_synthesizer_node(roles: list[str]):
     def node(state: DebateState) -> dict:
+        debate_history = state.get("debate_history", [])
+        current_round_entry = _build_round_entry(state)
+        if not debate_history or debate_history[-1]["round"] != current_round_entry["round"]:
+            debate_history = [*debate_history, current_round_entry]
+
         parts = []
         for role in roles:
             verdict_dict = state.get(f"{role}_verdict", {})
@@ -313,41 +217,127 @@ def make_synthesizer_node(roles: list[str]):
         else:
             final_result = " ".join(parts)
 
-        return {"final_result": final_result}
+        return {
+            "final_result": final_result,
+            "debate_history": debate_history,
+        }
+
     return node
+
+
+def _build_round_entry(state: DebateState) -> dict:
+    round_number = state["round"] + 1
+    verdicts = {}
+    debate_turns = {}
+    for role in state["active_roles"]:
+        verdict_dict = state.get(f"{role}_verdict", {})
+        debate_text = state.get(f"{role}_debate_text", "")
+        if verdict_dict:
+            verdicts[role] = verdict_dict
+        if debate_text:
+            debate_turns[role] = debate_text
+
+    return {
+        "round": round_number,
+        "verdicts": verdicts,
+        "debate_turns": debate_turns,
+    }
+
+
+def format_debate_trace(result: dict) -> str:
+    lines = []
+    debate_history = result.get("debate_history", [])
+
+    lines.append("Debate Trace")
+    lines.append(f"Rounds: {len(debate_history)}")
+    lines.append(f"Final result: {result.get('final_result', '')}")
+    lines.append("")
+
+    for round_info in debate_history:
+        lines.append(f"=== Round {round_info['round']} ===")
+        verdicts = round_info.get("verdicts", {})
+        debate_turns = round_info.get("debate_turns", {})
+
+        for role, verdict in verdicts.items():
+            role_name = role.replace("_", " ").title()
+            lines.append(
+                f"[{role_name}] flagged={verdict['flagged']} "
+                f"confidence={verdict['confidence']:.2f}"
+            )
+            lines.append(f"Reasoning: {verdict['reasoning']}")
+            if role in debate_turns:
+                lines.append(f"Debate text: {debate_turns[role]}")
+            lines.append("")
+
+    lines.append(
+        "Usage: "
+        f"prompt_tokens={result.get('total_prompt_tokens', 0)}, "
+        f"completion_tokens={result.get('total_completion_tokens', 0)}, "
+        f"llm_calls={result.get('total_llm_calls', 0)}"
+    )
+    return "\n".join(lines).rstrip()
+
+
+def print_debate_trace(result: dict) -> None:
+    print(format_debate_trace(result))
 
 
 def build_debate_graph(
     client: LLMClient,
-    retriever: LectureNoteRetriever | None = None,
+    retriever: "LectureNoteRetriever | None" = None,
     roles: list[str] | None = None,
     personas: dict[str, str] | None = None,
+    retriever_per_role: dict[str, "LectureNoteRetriever"] | None = None,
+    config: GenerationConfig | None = None,
 ):
     roles = roles or ALL_ROLES
     personas = personas or {role: "neutral" for role in roles}
-
-    if "completeness" in roles:
-        assert retriever is not None, "retriever is required when completeness role is included"
+    retriever_per_role = retriever_per_role or {}
 
     graph = StateGraph(DebateState)
 
-    # add critic nodes
     for role in roles:
+        role_retriever = retriever_per_role.get(role, retriever)
+
         if role == "conceptual":
-            graph.add_node("conceptual_critic", make_conceptual_critic_node(client, personas.get("conceptual", "neutral")))
+            graph.add_node(
+                "conceptual_critic",
+                make_conceptual_critic_node(
+                    client,
+                    personas.get("conceptual", "neutral"),
+                    retriever=role_retriever,
+                    config=config,
+                ),
+            )
         elif role == "procedural":
-            graph.add_node("procedural_critic", make_procedural_critic_node(client, personas.get("procedural", "neutral")))
+            graph.add_node(
+                "procedural_critic",
+                make_procedural_critic_node(
+                    client,
+                    personas.get("procedural", "neutral"),
+                    retriever=role_retriever,
+                    config=config,
+                ),
+            )
         elif role == "completeness":
-            graph.add_node("completeness_critic", make_completeness_critic_node(client, retriever))
+            if role_retriever is None:
+                raise ValueError("A retriever is required when completeness role is included")
+            graph.add_node(
+                "completeness_critic",
+                make_completeness_critic_node(
+                    client,
+                    role_retriever,
+                    config=config,
+                ),
+            )
 
     graph.add_node("orchestrator", make_orchestrator_node(roles))
     graph.add_node("debate_round", debate_round_node)
     graph.add_node("synthesizer", make_synthesizer_node(roles))
 
-    # chain critics sequentially
     graph.set_entry_point(f"{roles[0]}_critic")
-    for i in range(len(roles) - 1):
-        graph.add_edge(f"{roles[i]}_critic", f"{roles[i+1]}_critic")
+    for index in range(len(roles) - 1):
+        graph.add_edge(f"{roles[index]}_critic", f"{roles[index + 1]}_critic")
     graph.add_edge(f"{roles[-1]}_critic", "orchestrator")
 
     graph.add_conditional_edges(
