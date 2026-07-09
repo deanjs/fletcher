@@ -33,13 +33,22 @@ class EvalSummary:
 def evaluate_dataset(
     dataset_path: str,
     critic_fn: Callable[[str], tuple[bool, float, int, int, int]],
+    run_label: str = "",
+    verbose: bool = False,
 ) -> EvalSummary:
     with open(dataset_path) as f:
         dataset = json.load(f)
 
     results = []
 
-    for item in dataset:
+    for index, item in enumerate(dataset, start=1):
+        if verbose:
+            label_text = f"[{run_label}] " if run_label else ""
+            print(
+                f"{label_text}[eval] Sample {index}/{len(dataset)}: "
+                f"{item['id']} ({item['topic']})",
+                flush=True,
+            )
         flagged, latency_ms, prompt_tokens, completion_tokens, llm_calls = critic_fn(item["explanation"])
 
         results.append(EvalResult(
@@ -71,9 +80,9 @@ def evaluate_dataset(
 
 def print_summary(summary: EvalSummary, label: str = "") -> None:
     header = f"--- {label} ---" if label else "--- Eval Summary ---"
-    print(header)
-    print(f"accuracy:              {summary.accuracy:.2%} ({summary.correct}/{summary.total})")
-    print(f"avg latency:           {summary.avg_latency_ms:.1f} ms")
-    print(f"avg prompt tokens:     {summary.avg_prompt_tokens:.1f}")
-    print(f"avg completion tokens: {summary.avg_completion_tokens:.1f}")
-    print(f"avg llm calls:         {summary.avg_llm_calls:.1f}")
+    print(header, flush=True)
+    print(f"accuracy:              {summary.accuracy:.2%} ({summary.correct}/{summary.total})", flush=True)
+    print(f"avg latency:           {summary.avg_latency_ms:.1f} ms", flush=True)
+    print(f"avg prompt tokens:     {summary.avg_prompt_tokens:.1f}", flush=True)
+    print(f"avg completion tokens: {summary.avg_completion_tokens:.1f}", flush=True)
+    print(f"avg llm calls:         {summary.avg_llm_calls:.1f}", flush=True)

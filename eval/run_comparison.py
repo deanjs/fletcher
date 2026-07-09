@@ -78,6 +78,7 @@ def make_arch2_critic_fn(client, roles, retriever_per_role=None):
         roles=roles,
         retriever_per_role=retriever_per_role,
         config=EVAL_CONFIG,
+        verbose=True,
     )
 
     def critic_fn(explanation: str):
@@ -99,6 +100,7 @@ def make_arch2_critic_fn(client, roles, retriever_per_role=None):
                 "total_prompt_tokens": 0,
                 "total_completion_tokens": 0,
                 "total_llm_calls": 0,
+                "verbose": True,
             }
         )
         latency_ms = (time.perf_counter() - start) * 1000
@@ -156,8 +158,10 @@ def make_n_sweep_critic_fn(client, persona_list, retriever=None):
 def build_shared_retriever(top_k: int = 3) -> "LectureNoteRetriever":
     from fletcher.rag.lecture_notes.retriever import LectureNoteRetriever
 
+    print(f"Preparing shared retriever with top_k={top_k}...", flush=True)
     retriever = LectureNoteRetriever(top_k=top_k)
     retriever.build_index()
+    print(f"Shared retriever ready with top_k={top_k}.", flush=True)
     return retriever
 
 
@@ -165,53 +169,173 @@ def make_retriever_per_role(roles, retriever):
     return {role: retriever for role in roles}
 
 
+def record_summary(summary_records, section: str, config_name: str, dataset_label: str, summary) -> None:
+    summary_records.append({
+        "section": section,
+        "config": config_name,
+        "dataset": dataset_label,
+        "accuracy": summary.accuracy,
+        "latency_ms": summary.avg_latency_ms,
+        "llm_calls": summary.avg_llm_calls,
+    })
+
+
+def print_final_recap(summary_records: list[dict]) -> None:
+    print("\n=== Final Experiment Recap ===", flush=True)
+    for record in summary_records:
+        print(
+            f"[{record['section']}] {record['config']} / {record['dataset']} "
+            f"accuracy={record['accuracy']:.2%} "
+            f"avg_latency_ms={record['latency_ms']:.1f} "
+            f"avg_llm_calls={record['llm_calls']:.1f}",
+            flush=True,
+        )
+
+
 def run(backend: str = "hf"):
+    print("Starting FLETCHER evaluation run...", flush=True)
+    print(f"Backend: {backend}", flush=True)
     if torch is not None:
         torch.manual_seed(42)
+        print("Torch manual seed set to 42.", flush=True)
+    else:
+        print("Torch is not installed in this environment.", flush=True)
+
+    print("Initializing LLM client...", flush=True)
     client = create_llm_client(backend)
+    print("LLM client initialized.", flush=True)
 
-    print("=== Architecture 1 (Self-Critique) ===")
+    summary_records = []
+
+    print("=== Architecture 1 (Self-Critique) ===", flush=True)
     arch1_fn = make_arch1_critic_fn(client)
-    print_summary(evaluate_dataset(str(HARD_NEGATIVE_PATH), arch1_fn), label="Hard Negative")
-    print_summary(evaluate_dataset(str(NORMAL_PATH), arch1_fn), label="Normal")
+    print("Running Architecture 1 on Hard Negative dataset...", flush=True)
+    arch1_hn = evaluate_dataset(
+        str(HARD_NEGATIVE_PATH),
+        arch1_fn,
+        run_label="Architecture 1 / Hard Negative",
+        verbose=True,
+    )
+    print_summary(arch1_hn, label="Hard Negative")
+    record_summary(summary_records, "Architecture 1", "Self-Critique", "Hard Negative", arch1_hn)
+    print("Running Architecture 1 on Normal dataset...", flush=True)
+    arch1_normal = evaluate_dataset(
+        str(NORMAL_PATH),
+        arch1_fn,
+        run_label="Architecture 1 / Normal",
+        verbose=True,
+    )
+    print_summary(arch1_normal, label="Normal")
+    record_summary(summary_records, "Architecture 1", "Self-Critique", "Normal", arch1_normal)
 
-    print("\n=== Architecture 2 — R Sweep (No RAG) ===")
+    print("\n=== Architecture 2 — R Sweep (No RAG) ===", flush=True)
     for config_name, roles in ROLE_CONFIGS.items():
-        print(f"\n--- {config_name} ---")
+        print(f"\n--- {config_name} ---", flush=True)
+        print(f"Building debate graph for roles={roles} without retrieval...", flush=True)
         fn = make_arch2_critic_fn(client, roles, retriever_per_role=None)
-        print_summary(evaluate_dataset(str(HARD_NEGATIVE_PATH), fn), label="Hard Negative")
-        print_summary(evaluate_dataset(str(NORMAL_PATH), fn), label="Normal")
+        print("Running Hard Negative dataset...", flush=True)
+        hn_summary = evaluate_dataset(
+            str(HARD_NEGATIVE_PATH),
+            fn,
+            run_label=f"R Sweep / {config_name} / Hard Negative",
+            verbose=True,
+        )
+        print_summary(hn_summary, label="Hard Negative")
+        record_summary(summary_records, "R Sweep No RAG", config_name, "Hard Negative", hn_summary)
+        print("Running Normal dataset...", flush=True)
+        normal_summary = evaluate_dataset(
+            str(NORMAL_PATH),
+            fn,
+            run_label=f"R Sweep / {config_name} / Normal",
+            verbose=True,
+        )
+        print_summary(normal_summary, label="Normal")
+        record_summary(summary_records, "R Sweep No RAG", config_name, "Normal", normal_summary)
 
-    print("\n=== Architecture 2 — R Sweep (With RAG, top_k=3) ===")
+    print("\n=== Architecture 2 — R Sweep (With RAG, top_k=3) ===", flush=True)
     shared_retriever = build_shared_retriever(top_k=3)
     for config_name, roles in ROLE_CONFIGS.items():
-        print(f"\n--- {config_name} ---")
+        print(f"\n--- {config_name} ---", flush=True)
+        print(f"Building debate graph for roles={roles} with retrieval...", flush=True)
         fn = make_arch2_critic_fn(
             client,
             roles,
             retriever_per_role=make_retriever_per_role(roles, shared_retriever),
         )
-        print_summary(evaluate_dataset(str(HARD_NEGATIVE_PATH), fn), label="Hard Negative")
-        print_summary(evaluate_dataset(str(NORMAL_PATH), fn), label="Normal")
+        print("Running Hard Negative dataset...", flush=True)
+        hn_summary = evaluate_dataset(
+            str(HARD_NEGATIVE_PATH),
+            fn,
+            run_label=f"R Sweep With RAG / {config_name} / Hard Negative",
+            verbose=True,
+        )
+        print_summary(hn_summary, label="Hard Negative")
+        record_summary(summary_records, "R Sweep With RAG", config_name, "Hard Negative", hn_summary)
+        print("Running Normal dataset...", flush=True)
+        normal_summary = evaluate_dataset(
+            str(NORMAL_PATH),
+            fn,
+            run_label=f"R Sweep With RAG / {config_name} / Normal",
+            verbose=True,
+        )
+        print_summary(normal_summary, label="Normal")
+        record_summary(summary_records, "R Sweep With RAG", config_name, "Normal", normal_summary)
 
-    print("\n=== Architecture 2 — Retrieval Top-K Sweep (R=completeness only) ===")
+    print("\n=== Architecture 2 — Retrieval Top-K Sweep (R=completeness only) ===", flush=True)
     for top_k in RETRIEVAL_TOP_K_VALUES:
-        print(f"\n--- top_k={top_k} ---")
+        print(f"\n--- top_k={top_k} ---", flush=True)
         retriever = build_shared_retriever(top_k=top_k)
+        print("Building completeness-only debate graph...", flush=True)
         fn = make_arch2_critic_fn(
             client,
             ["completeness"],
             retriever_per_role={"completeness": retriever},
         )
-        print_summary(evaluate_dataset(str(HARD_NEGATIVE_PATH), fn), label="Hard Negative")
-        print_summary(evaluate_dataset(str(NORMAL_PATH), fn), label="Normal")
+        print("Running Hard Negative dataset...", flush=True)
+        hn_summary = evaluate_dataset(
+            str(HARD_NEGATIVE_PATH),
+            fn,
+            run_label=f"Retrieval Top-K / top_k={top_k} / Hard Negative",
+            verbose=True,
+        )
+        print_summary(hn_summary, label="Hard Negative")
+        record_summary(summary_records, "Retrieval Top-K", f"top_k={top_k}", "Hard Negative", hn_summary)
+        print("Running Normal dataset...", flush=True)
+        normal_summary = evaluate_dataset(
+            str(NORMAL_PATH),
+            fn,
+            run_label=f"Retrieval Top-K / top_k={top_k} / Normal",
+            verbose=True,
+        )
+        print_summary(normal_summary, label="Normal")
+        record_summary(summary_records, "Retrieval Top-K", f"top_k={top_k}", "Normal", normal_summary)
 
-    print("\n=== Architecture 2 — N Sweep (persona-based, R=conceptual only) ===")
+    print("\n=== Architecture 2 — N Sweep (persona-based, R=conceptual only) ===", flush=True)
     for config_name, persona_list in PERSONA_CONFIGS.items():
-        print(f"\n--- {config_name} ---")
+        print(f"\n--- {config_name} ---", flush=True)
+        print(f"Running persona ensemble: {persona_list}", flush=True)
         fn = make_n_sweep_critic_fn(client, persona_list)
-        print_summary(evaluate_dataset(str(HARD_NEGATIVE_PATH), fn), label="Hard Negative")
-        print_summary(evaluate_dataset(str(NORMAL_PATH), fn), label="Normal")
+        print("Running Hard Negative dataset...", flush=True)
+        hn_summary = evaluate_dataset(
+            str(HARD_NEGATIVE_PATH),
+            fn,
+            run_label=f"N Sweep / {config_name} / Hard Negative",
+            verbose=True,
+        )
+        print_summary(hn_summary, label="Hard Negative")
+        record_summary(summary_records, "N Sweep", config_name, "Hard Negative", hn_summary)
+        print("Running Normal dataset...", flush=True)
+        normal_summary = evaluate_dataset(
+            str(NORMAL_PATH),
+            fn,
+            run_label=f"N Sweep / {config_name} / Normal",
+            verbose=True,
+        )
+        print_summary(normal_summary, label="Normal")
+        record_summary(summary_records, "N Sweep", config_name, "Normal", normal_summary)
+
+    print("\nFLETCHER evaluation run completed.", flush=True)
+    print_final_recap(summary_records)
 
 
 if __name__ == "__main__":

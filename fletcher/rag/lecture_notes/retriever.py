@@ -51,24 +51,24 @@ class LectureNoteRetriever:
         self.index = None
 
     def build_index(self) -> None:
-        print("Fetching OpenStax content...")
+        print("Fetching OpenStax content...", flush=True)
         all_chunks = []
         for url in OPENSTAX_URLS:
-            print(f"  Fetching {url.split('/')[-1]}...")
+            print(f"  Fetching {url.split('/')[-1]}...", flush=True)
             text = fetch_openstax_text(url)
             chunks = chunk_text(text)
             all_chunks.extend(chunks)
-            print(f"  -> {len(chunks)} chunks")
+            print(f"  -> {len(chunks)} chunks", flush=True)
 
         self.passages = all_chunks
-        print(f"Encoding {len(self.passages)} chunks...")
+        print(f"Encoding {len(self.passages)} chunks...", flush=True)
         embeddings = self.model.encode(self.passages, show_progress_bar=True)
         embeddings = np.array(embeddings).astype("float32")
 
         dim = embeddings.shape[1]
         self.index = faiss.IndexFlatL2(dim)
         self.index.add(embeddings)
-        print("Index built.")
+        print("Index built.", flush=True)
 
     def retrieve(self, query: str) -> list[str]:
         query_embedding = self.model.encode([query])

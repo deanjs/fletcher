@@ -31,6 +31,7 @@ class DebateState(TypedDict):
     total_prompt_tokens: int
     total_completion_tokens: int
     total_llm_calls: int
+    verbose: bool
 
 
 def make_conceptual_critic_node(
@@ -43,6 +44,7 @@ def make_conceptual_critic_node(
 
     def node(state: DebateState) -> dict:
         debate_history = state.get("debate_history", [])
+        _log_state(state, "conceptual", "Evaluating the explanation.")
         verdict = critic.evaluate(
             state["explanation"],
             config=config,
@@ -53,6 +55,11 @@ def make_conceptual_critic_node(
             verdict,
             debate_history=debate_history,
             config=config,
+        )
+        _log_state(
+            state,
+            "conceptual",
+            f"Verdict flagged={verdict.flagged} confidence={verdict.confidence:.2f}.",
         )
         response = critic.last_response
         debate_response = critic.last_debate_response
@@ -88,6 +95,7 @@ def make_procedural_critic_node(
 
     def node(state: DebateState) -> dict:
         debate_history = state.get("debate_history", [])
+        _log_state(state, "procedural", "Evaluating the explanation.")
         verdict = critic.evaluate(
             state["explanation"],
             config=config,
@@ -98,6 +106,11 @@ def make_procedural_critic_node(
             verdict,
             debate_history=debate_history,
             config=config,
+        )
+        _log_state(
+            state,
+            "procedural",
+            f"Verdict flagged={verdict.flagged} confidence={verdict.confidence:.2f}.",
         )
         response = critic.last_response
         debate_response = critic.last_debate_response
@@ -134,6 +147,7 @@ def make_completeness_critic_node(
 
     def node(state: DebateState) -> dict:
         debate_history = state.get("debate_history", [])
+        _log_state(state, "completeness", "Evaluating the explanation with retrieval grounding.")
         verdict = critic.evaluate(
             state["explanation"],
             config=config,
@@ -144,6 +158,11 @@ def make_completeness_critic_node(
             verdict,
             debate_history=debate_history,
             config=config,
+        )
+        _log_state(
+            state,
+            "completeness",
+            f"Verdict flagged={verdict.flagged} confidence={verdict.confidence:.2f}.",
         )
         response = critic.last_response
         debate_response = critic.last_debate_response
@@ -171,6 +190,7 @@ def make_completeness_critic_node(
 
 def make_orchestrator_node(roles: list[str]):
     def node(state: DebateState) -> dict:
+        _log_state(state, "orchestrator", "Checking whether any critic flagged an issue.")
         issue_found = False
         for role in roles:
             verdict_dict = state.get(f"{role}_verdict", {})
@@ -179,14 +199,17 @@ def make_orchestrator_node(roles: list[str]):
                 if verdict.flagged:
                     issue_found = True
                     break
+        _log_state(state, "orchestrator", f"issue_found={issue_found}")
         return {"issue_found": issue_found}
 
     return node
 
 
 def debate_round_node(state: DebateState) -> dict:
+    next_round = state["round"] + 1
+    _log_state(state, "debate_round", f"Archiving round {next_round} and preparing the next round.")
     return {
-        "round": state["round"] + 1,
+        "round": next_round,
         "debate_history": [*state.get("debate_history", []), _build_round_entry(state)],
     }
 
@@ -199,6 +222,7 @@ def route_after_orchestrator(state: DebateState) -> str:
 
 def make_synthesizer_node(roles: list[str]):
     def node(state: DebateState) -> dict:
+        _log_state(state, "synthesizer", "Combining critic verdicts into the final result.")
         debate_history = state.get("debate_history", [])
         current_round_entry = _build_round_entry(state)
         if not debate_history or debate_history[-1]["round"] != current_round_entry["round"]:
@@ -282,6 +306,12 @@ def print_debate_trace(result: dict) -> None:
     print(format_debate_trace(result))
 
 
+def _log_state(state: DebateState, component: str, message: str) -> None:
+    if state.get("verbose", False):
+        current_round = state.get("round", 0) + 1
+        print(f"[{component}][round {current_round}] {message}", flush=True)
+
+
 def build_debate_graph(
     client: LLMClient,
     retriever: "LectureNoteRetriever | None" = None,
@@ -289,6 +319,7 @@ def build_debate_graph(
     personas: dict[str, str] | None = None,
     retriever_per_role: dict[str, "LectureNoteRetriever"] | None = None,
     config: GenerationConfig | None = None,
+    verbose: bool = False,
 ):
     roles = roles or ALL_ROLES
     personas = personas or {role: "neutral" for role in roles}
@@ -348,4 +379,6 @@ def build_debate_graph(
     graph.add_edge("debate_round", f"{roles[0]}_critic")
     graph.add_edge("synthesizer", END)
 
-    return graph.compile()
+    app = graph.compile()
+    app.verbose = verbose
+    return app
