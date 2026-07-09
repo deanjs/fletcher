@@ -1,3 +1,4 @@
+import logging
 import time
 
 import torch
@@ -5,6 +6,11 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
 from fletcher.llm.client import GenerationConfig, LLMClient, LLMResponse
 from fletcher.llm.message import Message
+
+# Silence the "Both `max_new_tokens` and `max_length` seem to have been set"
+# warning. We always pass max_new_tokens explicitly and intentionally clear
+# generation_config.max_length below, so the warning is a false positive.
+logging.getLogger("transformers.generation.utils").setLevel(logging.ERROR)
 
 
 class HFLocalClient(LLMClient):
