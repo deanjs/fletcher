@@ -1,8 +1,7 @@
 import logging
 import time
 
-import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from fletcher.llm.client import GenerationConfig, LLMClient, LLMResponse
 from fletcher.llm.message import Message
@@ -19,14 +18,13 @@ class HFLocalClient(LLMClient):
         model_name: str = "unsloth/Qwen2.5-7B-Instruct-bnb-4bit",
         device_map: str = "auto",
     ):
-        quant_config = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_compute_dtype=torch.float16,
-        )
+        # unsloth/Qwen2.5-7B-Instruct-bnb-4bit already ships its own
+        # quantization_config (bnb 4-bit); passing a second one here just
+        # triggers a "the model's own quantization_config will be used"
+        # warning, so we let the model's bundled config apply.
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name,
-            quantization_config=quant_config,
             device_map=device_map,
         )
         # The model's default generation_config ships with a fixed max_length
