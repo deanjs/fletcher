@@ -138,7 +138,7 @@ def make_procedural_critic_node(
 
 def make_completeness_critic_node(
     client: LLMClient,
-    retriever: "LectureNoteRetriever",
+    retriever: "LectureNoteRetriever | None",
     config: GenerationConfig | None = None,
 ):
     from fletcher.agents.content_critic.completeness import CompletenessCritic
@@ -147,7 +147,8 @@ def make_completeness_critic_node(
 
     def node(state: DebateState) -> dict:
         debate_history = state.get("debate_history", [])
-        _log_state(state, "completeness", "Evaluating the explanation with retrieval grounding.")
+        grounding_note = "with retrieval grounding" if retriever is not None else "without retrieval grounding"
+        _log_state(state, "completeness", f"Evaluating the explanation {grounding_note}.")
         verdict = critic.evaluate(
             state["explanation"],
             config=config,
@@ -351,8 +352,6 @@ def build_debate_graph(
                 ),
             )
         elif role == "completeness":
-            if role_retriever is None:
-                raise ValueError("A retriever is required when completeness role is included")
             graph.add_node(
                 "completeness_critic",
                 make_completeness_critic_node(

@@ -7,7 +7,7 @@ from fletcher.rag.lecture_notes.retriever import LectureNoteRetriever
 
 
 class CompletenessCritic:
-    def __init__(self, client: LLMClient, retriever: LectureNoteRetriever):
+    def __init__(self, client: LLMClient, retriever: LectureNoteRetriever | None = None):
         self.client = client
         self.retriever = retriever
         self.last_response: LLMResponse | None = None
@@ -20,18 +20,36 @@ class CompletenessCritic:
         config: GenerationConfig | None = None,
         debate_history: list[dict] | None = None,
     ) -> CriticVerdict:
-        context_passages = self.retriever.retrieve(explanation)
-        context = "\n\n".join(context_passages)
+        context = self._build_reference_context(explanation)
         debate_context = self._build_debate_context(debate_history)
+
+        if self.retriever is not None:
+            instruction = (
+                "You are a completeness critic for a computer science course. "
+                "You are given a reference passage from a textbook and a student explanation. "
+                "Evaluate ONLY whether the student explanation is missing key concepts "
+                "that appear in the reference passage. Do not evaluate correctness. "
+            )
+            user_content = (
+                f"Reference passage:\n{context}\n\n"
+                f"Student explanation:\n{explanation}"
+            )
+        else:
+            instruction = (
+                "You are a completeness critic for a computer science course. "
+                "No reference passage is available for this evaluation, so you must judge "
+                "completeness using only your own knowledge of the topic. "
+                "Evaluate ONLY whether the student explanation is missing key concepts "
+                "a correct explanation of this topic would be expected to cover. "
+                "Do not evaluate correctness. "
+            )
+            user_content = f"Student explanation:\n{explanation}"
 
         messages = [
             Message(
                 role="system",
                 content=(
-                    "You are a completeness critic for a computer science course. "
-                    "You are given a reference passage from a textbook and a student explanation. "
-                    "Evaluate ONLY whether the student explanation is missing key concepts "
-                    "that appear in the reference passage. Do not evaluate correctness. "
+                    f"{instruction}"
                     f"{debate_context}"
                     "Respond with ONLY a JSON object in this exact format, no other text:\n"
                     '{"flagged": true or false, "confidence": 0.0 to 1.0, "reasoning": "..."}'
@@ -39,10 +57,7 @@ class CompletenessCritic:
             ),
             Message(
                 role="user",
-                content=(
-                    f"Reference passage:\n{context}\n\n"
-                    f"Student explanation:\n{explanation}"
-                ),
+                content=user_content,
             ),
         ]
 
@@ -103,6 +118,13 @@ class CompletenessCritic:
             data = json.loads(text[start:end + 1])
 
         return CriticVerdict(role="completeness", **data)
+
+    def _build_reference_context(self, explanation: str) -> str:
+        if self.retriever is None:
+            return ""
+
+        context_passages = self.retriever.retrieve(explanation)
+        return "\n\n".join(context_passages)
 
     def _build_debate_context(self, debate_history: list[dict] | None) -> str:
         if not debate_history:

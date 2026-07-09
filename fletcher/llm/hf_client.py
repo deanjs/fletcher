@@ -23,6 +23,11 @@ class HFLocalClient(LLMClient):
             quantization_config=quant_config,
             device_map=device_map,
         )
+        # The model's default generation_config ships with a fixed max_length
+        # (e.g. 32768). Leaving it set makes `generate()` warn that
+        # max_new_tokens takes precedence on every call; clear it so only
+        # max_new_tokens governs output length.
+        self.model.generation_config.max_length = None
 
     def generate(
         self,
