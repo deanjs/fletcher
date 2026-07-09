@@ -1,0 +1,37 @@
+[
+  {
+    "id": "hn_001",
+    "topic": "hash table",
+    "explanation": "A hash table stores values sequentially in memory. To find a value, you scan through the array from the beginning until you find the matching key.",
+    "injected_error": "Hash tables do not store values sequentially, and lookup is O(1) via hash function, not O(n) sequential scan.",
+    "label": true
+  },
+  {
+    "id": "hn_002",
+    "topic": "hash table",
+    "explanation": "A hash table converts keys into array indices using a hash function. When two keys produce the same index, the second value simply overwrites the first one.",
+    "injected_error": "Collision handling is not overwriting. Correct methods are chaining or open addressing.",
+    "label": true
+  },
+  {
+    "id": "hn_003",
+    "topic": "linked list",
+    "explanation": "In a linked list, each node stores a value and a pointer to the previous node. To traverse the list, you start from the tail and follow pointers backward to the head.",
+    "injected_error": "A singly linked list points forward (to next node), not backward. Traversal goes from head to tail, not tail to head.",
+    "label": true
+  },
+  {
+    "id": "hn_004",
+    "topic": "binary search",
+    "explanation": "Binary search works on any array by repeatedly picking a random element and checking if it matches the target. This gives O(log n) performance on average.",
+    "injected_error": "Binary search requires a sorted array and always picks the middle element, not a random one. Random picking does not guarantee O(log n).",
+    "label": true
+  },
+  {
+    "id": "hn_005",
+    "topic": "stack",
+    "explanation": "A stack is a data structure where you can insert and remove elements from both ends. The element inserted first is the first one to be removed.",
+    "injected_error": "A stack only allows insertion and removal from one end (top), following LIFO order, not FIFO. FIFO describes a queue.",
+    "label": true
+  }
+]
