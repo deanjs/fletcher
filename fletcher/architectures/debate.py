@@ -321,21 +321,24 @@ def build_debate_graph(
     retriever_per_role: dict[str, "LectureNoteRetriever"] | None = None,
     config: GenerationConfig | None = None,
     verbose: bool = False,
+    client_per_role: dict[str, LLMClient] | None = None,
 ):
     roles = roles or ALL_ROLES
     personas = personas or {role: "neutral" for role in roles}
     retriever_per_role = retriever_per_role or {}
+    client_per_role = client_per_role or {}
 
     graph = StateGraph(DebateState)
 
     for role in roles:
         role_retriever = retriever_per_role.get(role, retriever)
+        role_client = client_per_role.get(role, client)
 
         if role == "conceptual":
             graph.add_node(
                 "conceptual_critic",
                 make_conceptual_critic_node(
-                    client,
+                    role_client,
                     personas.get("conceptual", "neutral"),
                     retriever=role_retriever,
                     config=config,
@@ -345,7 +348,7 @@ def build_debate_graph(
             graph.add_node(
                 "procedural_critic",
                 make_procedural_critic_node(
-                    client,
+                    role_client,
                     personas.get("procedural", "neutral"),
                     retriever=role_retriever,
                     config=config,
@@ -355,7 +358,7 @@ def build_debate_graph(
             graph.add_node(
                 "completeness_critic",
                 make_completeness_critic_node(
-                    client,
+                    role_client,
                     role_retriever,
                     config=config,
                 ),

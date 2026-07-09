@@ -9,9 +9,8 @@ except ModuleNotFoundError:  # pragma: no cover
 
 from eval.metrics import evaluate_dataset, print_summary
 from fletcher.architectures.debate import build_debate_graph
+from fletcher.architectures.persona_debate import run_persona_debate
 from fletcher.architectures.self_critique import SelfCritique
-from fletcher.agents.content_critic.conceptual import ConceptualCritic
-from fletcher.agents.content_critic.procedural import ProceduralCritic
 from fletcher.llm.client import GenerationConfig
 from fletcher.llm.factory import create_llm_client
 
@@ -46,6 +45,17 @@ PERSONA_CONFIGS = {
 
 RETRIEVAL_TOP_K_VALUES = [1, 3, 5]
 
+# Architecture 2 only (never Architecture 1 — self-critique is defined as the
+# SAME model checking itself, so mixing models there would break the baseline).
+# Giving one critic/persona a different, smaller model is a first step toward
+# reducing the "critics agree because they're the same weights" homogeneity
+# problem in debate. Kept small (one role, one persona) to fit in a single
+# Colab GPU alongside the main 7B model; set to None to disable and fall back
+# to the single-model behavior.
+SECONDARY_MODEL_NAME = "unsloth/Llama-3.2-3B-Instruct-bnb-4bit"
+SECONDARY_MODEL_ROLE = "completeness"
+SECONDARY_MODEL_PERSONA_KEY = "conceptual_merciful"
+
 
 def make_arch1_critic_fn(client):
     critic = SelfCritique(client)
@@ -66,19 +76,20 @@ def make_arch1_critic_fn(client):
             latency_ms,
             response.prompt_tokens,
             response.completion_tokens,
-            3,
+            critic.last_llm_calls,
         )
 
     return critic_fn
 
 
-def make_arch2_critic_fn(client, roles, retriever_per_role=None):
+def make_arch2_critic_fn(client, roles, retriever_per_role=None, client_per_role=None):
     app = build_debate_graph(
         client,
         roles=roles,
         retriever_per_role=retriever_per_role,
         config=EVAL_CONFIG,
         verbose=True,
+        client_per_role=client_per_role,
     )
 
     def critic_fn(explanation: str):
@@ -115,41 +126,25 @@ def make_arch2_critic_fn(client, roles, retriever_per_role=None):
     return critic_fn
 
 
-def make_n_sweep_critic_fn(client, persona_list, retriever=None):
+def make_n_sweep_critic_fn(client, persona_list, retriever=None, client_per_key=None):
     def critic_fn(explanation: str):
-        votes = []
-        total_latency = 0.0
-        total_prompt_tokens = 0
-        total_completion_tokens = 0
-        total_llm_calls = 0
-
-        for role, persona in persona_list:
-            if role == "conceptual":
-                critic = ConceptualCritic(client, persona=persona, retriever=retriever)
-            elif role == "procedural":
-                critic = ProceduralCritic(client, persona=persona, retriever=retriever)
-            else:
-                raise ValueError(f"Unsupported role for persona sweep: {role}")
-
-            start = time.perf_counter()
-            verdict = critic.evaluate(explanation, config=EVAL_CONFIG)
-            total_latency += (time.perf_counter() - start) * 1000
-            response = critic.last_response
-            if response is not None:
-                total_prompt_tokens += response.prompt_tokens
-                total_completion_tokens += response.completion_tokens
-                total_llm_calls += 1
-            votes.append(verdict.flagged)
-
-        flagged_count = sum(votes)
-        not_flagged_count = len(votes) - flagged_count
-        flagged = flagged_count > not_flagged_count
+        start = time.perf_counter()
+        result = run_persona_debate(
+            client,
+            persona_list,
+            explanation,
+            config=EVAL_CONFIG,
+            retriever=retriever,
+            verbose=True,
+            client_per_key=client_per_key,
+        )
+        latency_ms = (time.perf_counter() - start) * 1000
         return (
-            flagged,
-            total_latency,
-            total_prompt_tokens,
-            total_completion_tokens,
-            total_llm_calls,
+            result["flagged"],
+            latency_ms,
+            result["prompt_tokens"],
+            result["completion_tokens"],
+            result["llm_calls"],
         )
 
     return critic_fn
@@ -167,6 +162,21 @@ def build_shared_retriever(top_k: int = 3) -> "LectureNoteRetriever":
 
 def make_retriever_per_role(roles, retriever):
     return {role: retriever for role in roles}
+
+
+def make_client_per_role(roles, secondary_client):
+    if secondary_client is None or SECONDARY_MODEL_ROLE not in roles:
+        return None
+    return {SECONDARY_MODEL_ROLE: secondary_client}
+
+
+def make_client_per_key(persona_list, secondary_client):
+    if secondary_client is None:
+        return None
+    keys = {f"{role}_{persona}" for role, persona in persona_list}
+    if SECONDARY_MODEL_PERSONA_KEY not in keys:
+        return None
+    return {SECONDARY_MODEL_PERSONA_KEY: secondary_client}
 
 
 def record_summary(summary_records, section: str, config_name: str, dataset_label: str, summary) -> None:
@@ -205,6 +215,12 @@ def run(backend: str = "hf"):
     client = create_llm_client(backend)
     print("LLM client initialized.", flush=True)
 
+    secondary_client = None
+    if backend == "hf" and SECONDARY_MODEL_NAME:
+        print(f"Initializing secondary LLM client ({SECONDARY_MODEL_NAME}) for Architecture 2 model diversity...", flush=True)
+        secondary_client = create_llm_client(backend, model_name=SECONDARY_MODEL_NAME)
+        print("Secondary LLM client initialized.", flush=True)
+
     summary_records = []
 
     print("=== Architecture 1 (Self-Critique) ===", flush=True)
@@ -232,7 +248,12 @@ def run(backend: str = "hf"):
     for config_name, roles in ROLE_CONFIGS.items():
         print(f"\n--- {config_name} ---", flush=True)
         print(f"Building debate graph for roles={roles} without retrieval...", flush=True)
-        fn = make_arch2_critic_fn(client, roles, retriever_per_role=None)
+        fn = make_arch2_critic_fn(
+            client,
+            roles,
+            retriever_per_role=None,
+            client_per_role=make_client_per_role(roles, secondary_client),
+        )
         print("Running Hard Negative dataset...", flush=True)
         hn_summary = evaluate_dataset(
             str(HARD_NEGATIVE_PATH),
@@ -261,6 +282,7 @@ def run(backend: str = "hf"):
             client,
             roles,
             retriever_per_role=make_retriever_per_role(roles, shared_retriever),
+            client_per_role=make_client_per_role(roles, secondary_client),
         )
         print("Running Hard Negative dataset...", flush=True)
         hn_summary = evaluate_dataset(
@@ -314,7 +336,11 @@ def run(backend: str = "hf"):
     for config_name, persona_list in PERSONA_CONFIGS.items():
         print(f"\n--- {config_name} ---", flush=True)
         print(f"Running persona ensemble: {persona_list}", flush=True)
-        fn = make_n_sweep_critic_fn(client, persona_list)
+        fn = make_n_sweep_critic_fn(
+            client,
+            persona_list,
+            client_per_key=make_client_per_key(persona_list, secondary_client),
+        )
         print("Running Hard Negative dataset...", flush=True)
         hn_summary = evaluate_dataset(
             str(HARD_NEGATIVE_PATH),

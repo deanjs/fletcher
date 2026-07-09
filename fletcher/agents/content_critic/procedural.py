@@ -40,11 +40,12 @@ class ProceduralCritic:
         explanation: str,
         config: GenerationConfig | None = None,
         debate_history: list[dict] | None = None,
+        debate_key: str | None = None,
     ) -> CriticVerdict:
         persona_instruction = PERSONA_PROMPTS.get(self.persona, "")
         persona_line = f" {persona_instruction}" if persona_instruction else ""
         rag_context = self._build_rag_context(explanation)
-        debate_context = self._build_debate_context(debate_history, role="procedural")
+        debate_context = self._build_debate_context(debate_history, role=debate_key or "procedural")
 
         messages = [
             Message(
@@ -76,8 +77,9 @@ class ProceduralCritic:
         verdict: CriticVerdict,
         debate_history: list[dict] | None = None,
         config: GenerationConfig | None = None,
+        debate_key: str | None = None,
     ) -> str:
-        debate_context = self._build_debate_context(debate_history, role="procedural")
+        debate_context = self._build_debate_context(debate_history, role=debate_key or "procedural")
         round_instruction = (
             "State your current position to the other critics in two or three sentences. "
             "Defend your judgment and address any disagreement directly."
