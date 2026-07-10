@@ -1,6 +1,7 @@
 from typing import TYPE_CHECKING
 
 from fletcher.agents.content_critic.conceptual import ConceptualCritic
+from fletcher.agents.content_critic.completeness import CompletenessCritic
 from fletcher.agents.content_critic.procedural import ProceduralCritic
 from fletcher.agents.orchestrator import DebateCriticSpec, DebateOrchestrator
 from fletcher.llm.client import GenerationConfig, LLMClient
@@ -13,7 +14,14 @@ MAX_PERSONA_ROUNDS = 2
 PERSONA_CRITIC_CLASSES = {
     "conceptual": ConceptualCritic,
     "procedural": ProceduralCritic,
+    "completeness": CompletenessCritic,
 }
+
+
+def _make_critic(critic_cls, client: LLMClient, persona: str, retriever):
+    if critic_cls is CompletenessCritic:
+        return critic_cls(client, retriever=retriever)
+    return critic_cls(client, persona=persona, retriever=retriever)
 
 
 def _debate_key(role: str, persona: str) -> str:
@@ -76,7 +84,7 @@ def run_persona_debate(
                 key=key,
                 role=role,
                 persona=persona,
-                critic=critic_cls(persona_client, persona=persona, retriever=retriever),
+                critic=_make_critic(critic_cls, persona_client, persona, retriever),
             )
         )
 
@@ -123,7 +131,7 @@ def run_model_debate(
                 role=role,
                 persona=persona,
                 model=label,
-                critic=critic_cls(model_client, persona=persona, retriever=retriever),
+                critic=_make_critic(critic_cls, model_client, persona, retriever),
             )
         )
 
@@ -172,7 +180,7 @@ def run_combined_debate(
                 role=role,
                 persona=persona,
                 model=label,
-                critic=critic_cls(model_client, persona=persona, retriever=retriever),
+                critic=_make_critic(critic_cls, model_client, persona, retriever),
             )
         )
 

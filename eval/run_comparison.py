@@ -12,8 +12,10 @@ from eval.metrics import evaluate_dataset, print_summary
 from fletcher.architectures.debate import build_debate_graph
 from fletcher.architectures.persona_debate import run_combined_debate, run_model_debate, run_persona_debate
 from fletcher.architectures.self_critique import SelfCritique, SelfCritique1Pass
+from fletcher.architectures.skill_augmented import run_skill_persona_debate
 from fletcher.llm.client import GenerationConfig
 from fletcher.llm.factory import create_llm_client
+from fletcher.skills import SkillBank, SkillRetriever
 
 if TYPE_CHECKING:
     from fletcher.rag.lecture_notes.retriever import LectureNoteRetriever
@@ -22,6 +24,7 @@ if TYPE_CHECKING:
 HARD_NEGATIVE_PATH = Path(__file__).parent / "datasets/hard_negative/hard_negatives.json"
 NORMAL_PATH = Path(__file__).parent / "datasets/normal/normal_explanations.json"
 DEBATE_LOG_DIR = Path(__file__).parent / "debate_logs"
+SKILL_BANK_PATH = Path(__file__).parent.parent / "fletcher/skills/skill_bank.jsonl"
 EVAL_CONFIG = GenerationConfig(temperature=0.0, max_new_tokens=256)
 
 ROLE_CONFIGS = {
@@ -90,6 +93,21 @@ NM_SWEEP_SPEC = [
 # that comparison is what tells us grounding matters in the first place, so
 # it stays as the one place we deliberately toggle RAG on/off.
 NKM_RAG_VARIANTS: list[tuple[str, int | None]] = [("With RAG", 3)]
+S_SWEEP_PERSONA_CONFIG = PERSONA_CONFIGS["N2_strict_merciful"]
+S_SWEEP_TOP_K = 3
+
+
+class SmokeRetriever:
+    def __init__(self, top_k: int = 3):
+        self.top_k = top_k
+        self.passages = [
+            "Attention lets a token compare against multiple tokens in the input sequence.",
+            "Hash tables require collision handling because different keys can map to the same index.",
+            "A correct procedure should preserve the order and preconditions of the algorithm.",
+        ]
+
+    def retrieve(self, query: str) -> list[str]:
+        return self.passages[: self.top_k]
 
 
 def make_arch1a_critic_fn(client):
@@ -205,6 +223,33 @@ def make_n_sweep_critic_fn(client, persona_list, retriever=None, client_per_key=
     return critic_fn
 
 
+def make_skill_sweep_critic_fn(client, persona_list, skill_retriever, retriever=None, max_rounds=None):
+    def critic_fn(explanation: str):
+        start = time.perf_counter()
+        kwargs = {"max_rounds": max_rounds} if max_rounds is not None else {}
+        result = run_skill_persona_debate(
+            client,
+            persona_list,
+            explanation,
+            skill_retriever=skill_retriever,
+            config=EVAL_CONFIG,
+            retriever=retriever,
+            verbose=True,
+            **kwargs,
+        )
+        latency_ms = (time.perf_counter() - start) * 1000
+        return (
+            result["flagged"],
+            latency_ms,
+            result["prompt_tokens"],
+            result["completion_tokens"],
+            result["llm_calls"],
+            result["debate_log"],
+        )
+
+    return critic_fn
+
+
 def make_m_sweep_critic_fn(role, client_list, retriever=None, max_rounds=None):
     def critic_fn(explanation: str):
         start = time.perf_counter()
@@ -258,7 +303,14 @@ def make_nm_sweep_critic_fn(specs, retriever=None, max_rounds=None):
 
 
 def build_shared_retriever(top_k: int = 3) -> "LectureNoteRetriever":
-    from fletcher.rag.lecture_notes.retriever import LectureNoteRetriever
+    try:
+        from fletcher.rag.lecture_notes.retriever import LectureNoteRetriever
+    except ModuleNotFoundError as exc:
+        print(
+            f"RAG dependencies unavailable ({exc.name}); using SmokeRetriever fallback.",
+            flush=True,
+        )
+        return SmokeRetriever(top_k=top_k)
 
     print(f"Preparing shared retriever with top_k={top_k}...", flush=True)
     retriever = LectureNoteRetriever(top_k=top_k)
@@ -600,6 +652,53 @@ def run(backend: str = "hf", smoke: bool = False, log_debates: bool = False, deb
                 )
                 print_summary(normal_summary, label="Normal")
                 record_summary(summary_records, f"NM Sweep{rag_tag}", f"K={k}", "Normal", normal_summary)
+
+        print(
+            f"\n=== Architecture 3 — S Sweep{rag_tag} (skill retrieval off/on, fixed N2, K=1) ===",
+            flush=True,
+        )
+        skill_bank = SkillBank(SKILL_BANK_PATH)
+        if not skill_bank.skills:
+            print(f"Skipping S Sweep because SkillBank is empty: {SKILL_BANK_PATH}", flush=True)
+        else:
+            skill_retriever = SkillRetriever(skill_bank, top_k=S_SWEEP_TOP_K)
+            s_configs = {
+                "S_off": make_n_sweep_critic_fn(
+                    client,
+                    S_SWEEP_PERSONA_CONFIG,
+                    retriever=retriever,
+                    max_rounds=2,
+                ),
+                "S_on": make_skill_sweep_critic_fn(
+                    client,
+                    S_SWEEP_PERSONA_CONFIG,
+                    skill_retriever=skill_retriever,
+                    retriever=retriever,
+                    max_rounds=2,
+                ),
+            }
+            for config_name, fn in s_configs.items():
+                print(f"\n--- {config_name}{rag_tag} ---", flush=True)
+                print("Running Hard Negative dataset...", flush=True)
+                hn_summary = run_eval(
+                    str(HARD_NEGATIVE_PATH),
+                    fn,
+                    run_label=f"S Sweep{rag_tag} / {config_name} / Hard Negative",
+                    verbose=True,
+                    limit=sample_limit,
+                )
+                print_summary(hn_summary, label="Hard Negative")
+                record_summary(summary_records, f"S Sweep{rag_tag}", config_name, "Hard Negative", hn_summary)
+                print("Running Normal dataset...", flush=True)
+                normal_summary = run_eval(
+                    str(NORMAL_PATH),
+                    fn,
+                    run_label=f"S Sweep{rag_tag} / {config_name} / Normal",
+                    verbose=True,
+                    limit=sample_limit,
+                )
+                print_summary(normal_summary, label="Normal")
+                record_summary(summary_records, f"S Sweep{rag_tag}", config_name, "Normal", normal_summary)
 
     print("\nFLETCHER evaluation run completed.", flush=True)
     print_final_recap(summary_records)

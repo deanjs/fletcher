@@ -27,10 +27,14 @@ def iter_logs(paths: list[Path]):
                     raise ValueError(f"Invalid JSON in {path}:{line_number}: {exc}") from exc
 
 
-def distill_logs(input_path: Path, output_path: Path) -> dict:
+def distill_logs(input_path: Path, output_path: Path, reset: bool = False) -> dict:
     paths = iter_log_paths(input_path)
     if not paths:
         raise FileNotFoundError(f"No JSONL debate logs found under {input_path}")
+
+    if reset:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text("")
 
     bank = SkillBank(output_path)
     logs_seen = 0
@@ -64,9 +68,14 @@ def main() -> None:
         default=str(DEFAULT_OUTPUT),
         help="Output SkillBank JSONL path.",
     )
+    parser.add_argument(
+        "--reset",
+        action="store_true",
+        help="Clear the output SkillBank before writing distilled skills.",
+    )
     args = parser.parse_args()
 
-    summary = distill_logs(Path(args.input), Path(args.output))
+    summary = distill_logs(Path(args.input), Path(args.output), reset=args.reset)
     print(
         "Distilled "
         f"{summary['skills_created']} skills from {summary['logs_seen']} logs "

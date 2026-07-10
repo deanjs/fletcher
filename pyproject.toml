@@ -8,6 +8,12 @@ dependencies = [
     "accelerate",
     "bitsandbytes",
     "pydantic>=2.0",
+    "langgraph",
+    "numpy",
+    "faiss-cpu",
+    "requests",
+    "beautifulsoup4",
+    "sentence-transformers",
 ]
 
 [build-system]

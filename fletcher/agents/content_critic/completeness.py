@@ -1,13 +1,16 @@
 import json
+from typing import TYPE_CHECKING
 
 from fletcher.llm.client import GenerationConfig, LLMClient, LLMResponse
 from fletcher.llm.message import Message
 from fletcher.agents.schemas import CriticVerdict
-from fletcher.rag.lecture_notes.retriever import LectureNoteRetriever
+
+if TYPE_CHECKING:
+    from fletcher.rag.lecture_notes.retriever import LectureNoteRetriever
 
 
 class CompletenessCritic:
-    def __init__(self, client: LLMClient, retriever: LectureNoteRetriever | None = None):
+    def __init__(self, client: LLMClient, retriever: "LectureNoteRetriever | None" = None):
         self.client = client
         self.retriever = retriever
         self.last_response: LLMResponse | None = None
@@ -17,10 +20,11 @@ class CompletenessCritic:
         explanation: str,
         config: GenerationConfig | None = None,
         debate_history: list[dict] | None = None,
+        debate_key: str | None = None,
         request_message: bool = False,
     ) -> CriticVerdict:
         context = self._build_reference_context(explanation)
-        debate_context = self._build_debate_context(debate_history)
+        debate_context = self._build_debate_context(debate_history, role=debate_key or "completeness")
 
         if self.retriever is not None:
             instruction = (
@@ -101,15 +105,15 @@ class CompletenessCritic:
         context_passages = self.retriever.retrieve(explanation)
         return "\n\n".join(context_passages)
 
-    def _build_debate_context(self, debate_history: list[dict] | None) -> str:
+    def _build_debate_context(self, debate_history: list[dict] | None, role: str) -> str:
         if not debate_history:
             return ""
 
         previous_round = debate_history[-1]
         prior_verdicts = previous_round.get("verdicts", {})
 
-        own_verdict = prior_verdicts.get("completeness")
-        others = {k: v for k, v in prior_verdicts.items() if k != "completeness"}
+        own_verdict = prior_verdicts.get(role)
+        others = {k: v for k, v in prior_verdicts.items() if k != role}
         if not own_verdict and not others:
             return ""
 

@@ -683,7 +683,309 @@ fletcher/
 
 ---
 
-## 10. Progress Checklist
+## 10. Current Implementation Walkthrough
+
+This section describes what the current codebase actually implements. The earlier sections describe the research design; this section is the code-level map for maintaining and extending the project.
+
+### 10.1 Package responsibilities
+
+```text
+fletcher/
+├── pipeline.py                      # CLI-facing Architecture 1 pipeline
+├── llm/                             # backend-independent LLM interface
+├── agents/                          # reusable agent roles and schemas
+├── architectures/                   # experiment-level architecture wrappers
+│   └── full_debate.py                # complete Stage 1 -> Stage 2 Architecture 2 wrapper
+├── rag/lecture_notes/               # OpenStax retrieval prototype
+├── skills/                           # skill distillation, storage, retrieval
+├── finetuning/                       # reward/training-record preparation
+└── serving/                          # serving and latency-planning utilities
+
+eval/
+├── datasets/                        # hard-negative and normal eval data
+├── metrics.py                       # accuracy/latency/token aggregation
+├── run_comparison.py                # experiment sweep runner
+└── debate_logs/                     # optional JSONL debate trajectories
+
+scripts/                             # smoke tests and utility scripts
+```
+
+The implementation is intentionally layered:
+
+1. `fletcher.llm` defines the model boundary. Agents do not call Transformers directly; they call `LLMClient.generate()`.
+2. `fletcher.agents` defines role behavior: critics, debate orchestration, structured verdicts, and note rewriting.
+3. `fletcher.architectures` composes agents into Architecture 1, Architecture 2, and Architecture 3 variants.
+4. `eval` runs the same datasets through different architecture configurations and records comparable metrics.
+5. `skills` turns labeled debate trajectories into reusable SkillBank entries that can be retrieved in later debates.
+
+### 10.2 LLM backend layer
+
+The LLM boundary is defined in `fletcher/llm/client.py`.
+
+- `GenerationConfig` controls `temperature`, `max_new_tokens`, and `top_p`.
+- `LLMResponse` standardizes generated text, prompt tokens, completion tokens, and latency.
+- `LLMClient` is the abstract interface every backend must implement.
+
+Current backends:
+
+- `FakeLLMClient` returns a canned response and estimates token counts with whitespace splitting. It is used by smoke tests and pipeline sanity checks.
+- `HFLocalClient` loads a HuggingFace causal LM, currently defaulting to `unsloth/Qwen2.5-7B-Instruct-bnb-4bit`, applies the tokenizer chat template, runs local generation, and reports token/latency metrics.
+- `create_llm_client()` in `fletcher/llm/factory.py` selects `fake` or `hf`.
+
+Because every critic receives an `LLMClient`, the debate system can swap backends without rewriting agent logic. The evaluation harness also uses this boundary to run single-model, two-model, and fake-backend smoke configurations.
+
+### 10.3 Architecture 1: Self-Critique pipeline
+
+The user-facing MVP pipeline is in `fletcher/pipeline.py`.
+
+```mermaid
+flowchart LR
+    Input["Student explanation"]
+    Client["create_llm_client"]
+    Critic["SelfCritique"]
+    NoteWriter["NoteWriter"]
+    Output["Personalized review note"]
+
+    Input --> Client
+    Client --> Critic
+    Critic --> NoteWriter
+    NoteWriter --> Output
+```
+
+`run_pipeline(explanation, tone_sample, backend)` does the following:
+
+1. Builds an LLM client through `create_llm_client(backend)`.
+2. Runs `SelfCritique.critique(explanation)`.
+3. Sends the critique to `NoteWriter.rewrite(critique_text, tone_sample)`.
+4. Returns the final note written in the user's tone.
+
+There are two Architecture 1 variants:
+
+- `SelfCritique1Pass` is the strict baseline: one critique call only. It requires the model to end with `VERDICT: FLAGGED` or `VERDICT: OK`, then parses that line into `last_flagged`.
+- `SelfCritique` is the adaptive version: initial critique, JSON self-review with a sufficiency confidence, optional revision, and repeated review/revision up to `MAX_ITERATIONS`.
+
+The adaptive version separates the model's raw confidence from the stopping rule. The model emits `confidence`; code compares it against `SUFFICIENCY_THRESHOLD`. This keeps the stopping policy measurable and replaceable later.
+
+### 10.4 Critic roles and structured verdicts
+
+All critic roles converge to the same schema in `fletcher/agents/schemas.py`:
+
+```json
+{
+  "role": "conceptual | procedural | completeness",
+  "flagged": true,
+  "reasoning": "...",
+  "confidence": 0.0,
+  "message_to_others": "..."
+}
+```
+
+`message_to_others` is empty in non-debate contexts and populated during Stage 1 debate. This field is what allows one critic's argument to become another critic's next-round context.
+
+Current critic implementations:
+
+- `ConceptualCritic` checks only concepts and definitions. It ignores procedural ordering.
+- `ProceduralCritic` checks only steps, ordering, and application procedure. It ignores whether definitions themselves are correct.
+- `CompletenessCritic` checks whether key ideas are missing. With a retriever, it compares against retrieved reference passages; without one, it falls back to model knowledge.
+
+Conceptual and Procedural critics support the current persona axis:
+
+- `strict`: flags ambiguity and minor potential issues more aggressively.
+- `merciful`: flags only clear and significant issues.
+- `neutral`: no extra threshold instruction.
+
+Each critic can optionally receive a `LectureNoteRetriever`. If present, retrieved passages are injected into the system prompt as grounding evidence.
+
+### 10.5 Architecture 2: Debate implementation
+
+Architecture 2 is split into two code paths that correspond to different experimental axes.
+
+#### Stage 1: same-target debate
+
+Stage 1 is implemented by `DebateOrchestrator` in `fletcher/agents/orchestrator.py` and wrapped by `fletcher/architectures/persona_debate.py`.
+
+```mermaid
+flowchart TD
+    Input["Student explanation"]
+    Round["Round i: every critic evaluates"]
+    Disagreement{"Any flagged/not-flagged disagreement?"}
+    Next["Inject previous verdicts/messages into next prompt"]
+    Final["Majority vote final decision"]
+
+    Input --> Round
+    Round --> Disagreement
+    Disagreement -->|Yes and rounds remain| Next
+    Next --> Round
+    Disagreement -->|No or max rounds reached| Final
+```
+
+The orchestrator receives a list of `DebateCriticSpec` objects. Each spec names the critic key, role, persona, optional model label, and critic instance.
+
+For each round:
+
+1. Every critic evaluates the same explanation.
+2. Each verdict is stored in `debate_history`.
+3. Token counts and LLM call counts are accumulated from each critic's `last_response`.
+4. Skill retrieval metrics are accumulated if the critic is skill-augmented.
+5. Disagreement is detected by checking whether critics disagree on `flagged`.
+6. If all critics agree, the debate stops early.
+7. If they disagree and rounds remain, the next round prompt includes each critic's own previous verdict and the other critics' messages.
+
+The final decision rule is currently majority vote over the latest verdicts.
+
+Current Stage 1 wrappers:
+
+- `run_persona_debate()` varies persona within the same role, usually `strict` vs. `merciful`.
+- `run_model_debate()` fixes role and persona but varies model backend, isolating model diversity.
+- `run_combined_debate()` varies persona and model together, intended only after isolated N and M sweeps.
+- `run_full_debate()` in `architectures/full_debate.py` runs Stage 1 inside each role and then sends the per-role majority verdicts into Stage 2 synthesis.
+
+#### Stage 2: role aggregation
+
+`fletcher/architectures/debate.py` builds a LangGraph state graph for role-level aggregation.
+
+```mermaid
+flowchart LR
+    Input["Student explanation"]
+    C["ConceptualCritic"]
+    P["ProceduralCritic"]
+    M["CompletenessCritic"]
+    S["Synthesizer node"]
+    Result["issue_found + final_result"]
+
+    Input --> C --> P --> M --> S --> Result
+```
+
+This graph is for the R-axis: different roles evaluate different targets. The code intentionally does not run rebuttal rounds between roles, because a conceptual issue and a procedural issue can both be true at the same time. The synthesizer node simply combines flagged role verdicts into a final result.
+
+The graph supports:
+
+- `roles`: choose conceptual/procedural/completeness combinations.
+- `personas`: choose persona per role.
+- `retriever_per_role`: pass retrieval differently per role.
+- `client_per_role`: pass different LLM clients per role.
+- metric accumulation in `total_prompt_tokens`, `total_completion_tokens`, and `total_llm_calls`.
+
+### 10.6 Architecture 3: Skill-augmented debate
+
+Architecture 3 is implemented in `fletcher/architectures/skill_augmented.py` plus the `fletcher/skills` package.
+
+```mermaid
+flowchart LR
+    Log["Labeled debate log"]
+    Distill["distill_skills_from_debate_log"]
+    Bank[("SkillBank JSONL")]
+    Retrieve["SkillRetriever.retrieve"]
+    Prompt["Skill context + student explanation"]
+    Debate["run_skill_persona_debate"]
+
+    Log --> Distill --> Bank
+    Bank --> Retrieve --> Prompt --> Debate
+```
+
+The current skill loop is:
+
+1. `distill_skills_from_debate_log(log)` reads a labeled debate trajectory.
+2. It compares expected vs. predicted flag labels.
+3. It converts final critic reasoning into task-specific `Skill` objects.
+4. `SkillBank` stores skills as JSONL and filters candidates by role.
+5. `SkillRetriever` retrieves top-k skills by token-overlap similarity.
+6. `SkillAugmentedCritic` formats retrieved skills and prepends them to the student explanation before calling the base critic.
+7. `DebateOrchestrator` records retrieval latency, skill count, skill token count, and retrieved skill IDs.
+
+This is not yet an embedding-based SkillBank or an RL-trained policy. It is a small, inspectable version of the full loop that makes the Architecture 3 data path testable.
+
+### 10.7 RAG prototype
+
+`fletcher/rag/lecture_notes/retriever.py` is the current lecture-note retrieval prototype.
+
+It:
+
+1. Fetches selected OpenStax pages.
+2. Removes page chrome such as nav/header/footer/script/style.
+3. Chunks text by words with overlap.
+4. Embeds chunks with `SentenceTransformer`.
+5. Builds a FAISS `IndexFlatL2`.
+6. Retrieves top-k passages for a student explanation.
+
+The current retriever is useful for experiments, but it is still a prototype: the OpenStax URLs are hardcoded, the index is built in memory, and `retrieve()` assumes `build_index()` has already been called.
+
+### 10.8 Evaluation pipeline
+
+The main experiment runner is `eval/run_comparison.py`.
+
+```mermaid
+flowchart TD
+    Datasets["Hard Negative + Normal datasets"]
+    A1["Architecture 1a/1b"]
+    R["R Sweep: role combinations"]
+    N["N Sweep: persona combinations"]
+    K["K Sweep: debate rounds"]
+    M["M Sweep: model diversity"]
+    NM["NM Sweep: persona + model"]
+    Metrics["accuracy, latency, tokens, llm calls"]
+    Logs["optional debate_logs JSONL"]
+
+    Datasets --> A1 --> Metrics
+    Datasets --> R --> Metrics
+    Datasets --> N --> Metrics
+    Datasets --> K --> Metrics
+    Datasets --> M --> Metrics
+    Datasets --> NM --> Metrics
+    N --> Logs
+    K --> Logs
+    M --> Logs
+    NM --> Logs
+```
+
+`eval/metrics.py` provides the common evaluation loop. A `critic_fn` returns:
+
+```python
+(flagged, latency_ms, prompt_tokens, completion_tokens, llm_calls)
+```
+
+Debate-capable runs may additionally return a `debate_log`. When a log path is provided, the evaluator writes JSONL records that include:
+
+- sample id, run label, topic, and explanation
+- expected label from the dataset
+- predicted label and correctness
+- final debate decision
+- per-round critic verdicts
+- token, latency, LLM call, and skill retrieval metrics
+
+`run_comparison.py` currently evaluates:
+
+- Architecture 1a: one-pass self-critique baseline
+- Architecture 1b: adaptive self-critique
+- Architecture 2 R sweep without RAG
+- Architecture 2 R sweep with RAG
+- Architecture 2 N sweep with RAG
+- Architecture 2 K sweep with RAG
+- Architecture 2 M sweep when a secondary HF model is configured
+- Architecture 2 NM sweep when a secondary HF model is configured
+- Architecture 3 S sweep comparing skill retrieval off/on with fixed N2 and K=1
+
+Smoke mode limits each dataset to one sample and trims sweep configs so the pipeline can be checked before spending GPU time.
+
+### 10.9 Training and serving support
+
+`fletcher/finetuning/policy_update.py` prepares the reward side of the future Cold-Start SFT / GRPO path. It does not train a model yet; it converts evaluated debate logs into stable training records with:
+
+- outcome reward based on correctness
+- skill-reuse bonus when a retrieved skill contributes to a correct result
+- schema-validity bonus
+- anomaly penalty for malformed trajectories
+
+`fletcher/serving/config.py` holds serving configuration and a simple round-latency estimator for sequential, asyncio-style, and future vLLM execution modes. This gives the evaluation code a place to reason about concurrency and serving optimization before the actual vLLM server is added.
+
+### 10.10 Current gaps and cleanup targets
+
+- Stage 1 same-role debate and Stage 2 role aggregation are unified by `run_full_debate()`, but the older LangGraph R-axis path and the N/K/M/NM sweep wrappers remain separate for controlled experiments.
+- The debate orchestrator runs critics sequentially inside each round. The README research design discusses parallel critic calls, but the current implementation prioritizes determinism and easier logging.
+- Skill retrieval is token-overlap based, not embedding based yet.
+- Cold-Start SFT, GRPO optimization, actual vLLM serving, persistent vector DB storage, UI, and production deployment are still future work.
+
+## 11. Progress Checklist
 
 - [x] Project planning finalized
 - [x] Architecture design (Architecture 1/2/3, R/N/K/S variables defined)
@@ -696,39 +998,39 @@ fletcher/
 - [x] Directory structure finalized
 - [x] 0-1. Choose model + set up Colab GPU environment
 - [x] 0-2. Set up minimal repo skeleton
-- [ ] 0-3. Implement LLM call abstraction layer
-- [ ] 0-4. Implement Self-Critique pipeline
-- [ ] 0-5. Implement minimal NoteWriter
-- [ ] 0-6. Confirm end-to-end pipeline works
-- [ ] 1-1. Learn LangGraph basics + build skeleton
-- [ ] 1-2. Define structured output schema
-- [ ] 1-3. Implement Conceptual/Procedural Critic
-- [ ] 1-4. Implement Orchestrator consensus/disagreement logic
-- [ ] 1-5. Implement Debate Round (fixed number of rounds, K)
-- [ ] 1-6. Implement Synthesizer
-- [ ] 1-7. Connect full Architecture 2 pipeline, confirm it works
-- [ ] 1.5-1. Build Hard Negative test set
-- [ ] 1.5-2. Build normal explanation dataset
-- [ ] 1.5-3. Write measurement code
-- [ ] 1.5-4. (baseline) Measure each persona alone (Strict-only, Merciful-only, no debate)
-- [ ] 1.5-5. Run Architecture 1 vs 2 comparison
-- [ ] 1.5-6. Sweep ensemble size (N) — persona-based (Strict/Merciful/Neutral)
-- [ ] 2-1. Build vector DB
-- [ ] 2-2. Apply per-critic retrieval target separation
-- [ ] 2-3. Add Completeness Critic
-- [ ] 2-4. Sweep role diversity (R)
-- [ ] 2-5. Search N × R × K combination space
+- [x] 0-3. Implement LLM call abstraction layer
+- [x] 0-4. Implement Self-Critique pipeline
+- [x] 0-5. Implement minimal NoteWriter
+- [x] 0-6. Confirm end-to-end pipeline works
+- [x] 1-1. Learn LangGraph basics + build skeleton
+- [x] 1-2. Define structured output schema
+- [x] 1-3. Implement Conceptual/Procedural Critic
+- [x] 1-4. Implement Orchestrator consensus/disagreement logic
+- [x] 1-5. Implement Debate Round (fixed number of rounds, K)
+- [x] 1-6. Implement Synthesizer
+- [x] 1-7. Connect full Architecture 2 pipeline, confirm it works
+- [x] 1.5-1. Build Hard Negative test set
+- [x] 1.5-2. Build normal explanation dataset
+- [x] 1.5-3. Write measurement code
+- [x] 1.5-4. (baseline) Measure each persona alone (Strict-only, Merciful-only, no debate)
+- [x] 1.5-5. Run Architecture 1 vs 2 comparison
+- [x] 1.5-6. Sweep ensemble size (N) — persona-based (Strict/Merciful/Neutral)
+- [x] 2-1. Build vector DB
+- [x] 2-2. Apply per-critic retrieval target separation
+- [x] 2-3. Add Completeness Critic
+- [x] 2-4. Sweep role diversity (R)
+- [x] 2-5. Search N × R × K combination space
 - [ ] 2-6. (Extension) Add second persona axis (Literal/Charitable), test vs. single axis
 - [ ] 3-0. Learn reinforcement learning fundamentals (policy, reward, trajectory)
-- [ ] 3-1. Implement Debate log → Experience Distillation pipeline
-- [ ] 3-2. Build hierarchical SkillBank
-- [ ] 3-3. Integrate skill retrieval
-- [ ] 3-4. Sweep skill usage (S) on/off
+- [x] 3-1. Implement Debate log → Experience Distillation pipeline
+- [x] 3-2. Build hierarchical SkillBank
+- [x] 3-3. Integrate skill retrieval
+- [x] 3-4. Sweep skill usage (S) on/off
 - [ ] 3-4.5. Cold-Start SFT — teach critic to retrieve/apply skills before RL
 - [ ] 3-5. Strengthen critic policy with GRPO
-- [ ] 3-6. Apply KV Cache, Flash Attention, vLLM
+- [ ] 3-6. Apply KV Cache, Flash Attention, vLLM serving runtime
 - [ ] 3-7. Run GPU parallelism experiments
 - [ ] 3-8. Apply Unsloth fine-tuning
 - [ ] 3-9. Run post-training / reinforcement learning experiments
 - [ ] 3-9.5. (Extension) Grounding-confidence self-labeling on real sessions + hand-label validation slice
-- [ ] 3-10. Organize debate log / distillation data (preserved for future research)
+- [x] 3-10. Organize debate log / distillation data (preserved for future research)

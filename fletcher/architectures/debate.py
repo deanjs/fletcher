@@ -4,7 +4,7 @@ from langgraph.graph import END, StateGraph
 
 from fletcher.agents.content_critic.conceptual import ConceptualCritic
 from fletcher.agents.content_critic.procedural import ProceduralCritic
-from fletcher.agents.schemas import CriticVerdict
+from fletcher.agents.synthesizer import Synthesizer
 from fletcher.llm.client import GenerationConfig, LLMClient
 
 if TYPE_CHECKING:
@@ -130,27 +130,23 @@ def make_completeness_critic_node(
 
 
 def make_synthesizer_node(roles: list[str]):
+    synthesizer = Synthesizer()
+
     def node(state: DebateState) -> dict:
         _log_state(state, "synthesizer", "Combining per-role verdicts into the final result (no rebuttal).")
 
-        parts = []
-        any_flagged = False
-        for role in roles:
-            verdict_dict = state.get(f"{role}_verdict", {})
-            if verdict_dict:
-                verdict = CriticVerdict(**verdict_dict)
-                if verdict.flagged:
-                    any_flagged = True
-                    parts.append(f"{role.capitalize()} issue: {verdict.reasoning}")
-
-        if not parts:
-            final_result = "No issues found. The explanation is accurate and complete."
-        else:
-            final_result = " ".join(parts)
+        verdicts = {
+            role: state.get(f"{role}_verdict", {})
+            for role in roles
+        }
+        result = synthesizer.synthesize(verdicts)
 
         _log_blank(state)
 
-        return {"issue_found": any_flagged, "final_result": final_result}
+        return {
+            "issue_found": result["issue_found"],
+            "final_result": result["final_result"],
+        }
 
     return node
 
