@@ -9,7 +9,7 @@ except ModuleNotFoundError:  # pragma: no cover
 
 from eval.metrics import evaluate_dataset, print_summary
 from fletcher.architectures.debate import build_debate_graph
-from fletcher.architectures.persona_debate import run_model_debate, run_persona_debate
+from fletcher.architectures.persona_debate import run_combined_debate, run_model_debate, run_persona_debate
 from fletcher.architectures.self_critique import SelfCritique, SelfCritique1Pass
 from fletcher.llm.client import GenerationConfig
 from fletcher.llm.factory import create_llm_client
@@ -28,6 +28,7 @@ ROLE_CONFIGS = {
     "R1_completeness": ["completeness"],
     "R2_conceptual_procedural": ["conceptual", "procedural"],
     "R2_conceptual_completeness": ["conceptual", "completeness"],
+    "R2_procedural_completeness": ["procedural", "completeness"],
     "R3_all": ["conceptual", "procedural", "completeness"],
 }
 
@@ -42,8 +43,6 @@ PERSONA_CONFIGS = {
         ("conceptual", "merciful"),
     ],
 }
-
-RETRIEVAL_TOP_K_VALUES = [1, 3, 5]
 
 # K = number of rebuttal rounds allowed once Stage-1 (N-axis, same role)
 # critics disagree (README 6.3). K=0 means "evaluate once, never rebut."
@@ -74,22 +73,21 @@ M_SWEEP_PERSONA = "neutral"
 # Sweep entirely (e.g. when running with a mock/fake backend).
 SECONDARY_MODEL_NAME = "unsloth/Llama-3.2-3B-Instruct-bnb-4bit"
 
-# N/K/M axes are studied WITHOUT grounding first, for the same reason they
-# stay single-model: mixing in RAG would confound "does persona / debate
-# depth / model diversity help" with "does grounding help" — exactly the
-# R-sweep-confound problem again, just on a third axis. Once R Sweep shows
-# whether RAG matters, add a ("With RAG", top_k) entry here to re-run N/K/M
-# with grounding on and check the effect still holds. Each entry is
-# (label, top_k_or_None); top_k=None means no retriever is built at all.
-NKM_RAG_VARIANTS: list[tuple[str, int | None]] = [("No RAG", None)]
-# NKM_RAG_VARIANTS = [("No RAG", None), ("With RAG", 3)]  # <- flip on later
+# NM-axis: persona AND model both vary at once — the deliberate combined
+# follow-up to N (persona alone) and M (model alone). Each entry is
+# (role, persona, label); label is combined with client at run() time.
+NM_SWEEP_ROLE = "conceptual"
+NM_SWEEP_SPEC = [
+    ("strict", "qwen"),
+    ("merciful", "llama"),
+]
 
-
-def _flagged_from_critique_text(critique_text: str) -> bool:
-    return any(
-        keyword in critique_text.lower()
-        for keyword in ["incorrect", "wrong", "missing", "error", "inaccurate", "issue"]
-    )
+# N/K/M/NM all reason over RAG-grounded context by default now (fixed
+# top_k=3, matching R Sweep's fixed With-RAG setting) rather than sweeping
+# retrieval depth separately. R Sweep still runs both No-RAG and With-RAG —
+# that comparison is what tells us grounding matters in the first place, so
+# it stays as the one place we deliberately toggle RAG on/off.
+NKM_RAG_VARIANTS: list[tuple[str, int | None]] = [("With RAG", 3)]
 
 
 def make_arch1a_critic_fn(client):
@@ -98,10 +96,10 @@ def make_arch1a_critic_fn(client):
 
     def critic_fn(explanation: str):
         start = time.perf_counter()
-        critique_text = critic.critique(explanation, config=EVAL_CONFIG)
+        critic.critique(explanation, config=EVAL_CONFIG)
         response = critic.last_response
         latency_ms = (time.perf_counter() - start) * 1000
-        flagged = _flagged_from_critique_text(critique_text)
+        flagged = critic.last_flagged
         if response is None:
             return flagged, latency_ms, 0, 0, 0
         return (
@@ -122,10 +120,10 @@ def make_arch1b_critic_fn(client):
 
     def critic_fn(explanation: str):
         start = time.perf_counter()
-        critique_text = critic.critique(explanation, config=EVAL_CONFIG)
+        critic.critique(explanation, config=EVAL_CONFIG)
         response = critic.last_response
         latency_ms = (time.perf_counter() - start) * 1000
-        flagged = _flagged_from_critique_text(critique_text)
+        flagged = critic.last_flagged
         if response is None:
             return flagged, latency_ms, 0, 0, 0
         return (
@@ -230,6 +228,30 @@ def make_m_sweep_critic_fn(role, client_list, retriever=None, max_rounds=None):
     return critic_fn
 
 
+def make_nm_sweep_critic_fn(specs, retriever=None, max_rounds=None):
+    def critic_fn(explanation: str):
+        start = time.perf_counter()
+        kwargs = {"max_rounds": max_rounds} if max_rounds is not None else {}
+        result = run_combined_debate(
+            specs,
+            explanation,
+            config=EVAL_CONFIG,
+            retriever=retriever,
+            verbose=True,
+            **kwargs,
+        )
+        latency_ms = (time.perf_counter() - start) * 1000
+        return (
+            result["flagged"],
+            latency_ms,
+            result["prompt_tokens"],
+            result["completion_tokens"],
+            result["llm_calls"],
+        )
+
+    return critic_fn
+
+
 def build_shared_retriever(top_k: int = 3) -> "LectureNoteRetriever":
     from fletcher.rag.lecture_notes.retriever import LectureNoteRetriever
 
@@ -294,12 +316,10 @@ def run(backend: str = "hf", smoke: bool = False):
     # each checklist item cheaply:
     # - one single-critic config (no-debate path) and one multi-critic
     #   config (disagreement-gated round path) for R Sweep
-    # - one top_k for the retrieval sweep
     # - one N>=2 persona config (so disagreement/early-stop can be observed)
     # - two K values (off vs on) instead of the full 0-3 range
     # - M Sweep already only has 2 roles, left as-is
     role_configs = ROLE_CONFIGS
-    retrieval_top_k_values = RETRIEVAL_TOP_K_VALUES
     persona_configs = PERSONA_CONFIGS
     k_values = K_VALUES
     k_sweep_persona_configs = K_SWEEP_PERSONA_CONFIGS
@@ -308,7 +328,6 @@ def run(backend: str = "hf", smoke: bool = False):
             "R1_conceptual": ROLE_CONFIGS["R1_conceptual"],
             "R2_conceptual_procedural": ROLE_CONFIGS["R2_conceptual_procedural"],
         }
-        retrieval_top_k_values = [3]
         persona_configs = {"N2_strict_merciful": PERSONA_CONFIGS["N2_strict_merciful"]}
         k_values = [0, 2]
         k_sweep_persona_configs = {"N2_strict_merciful": PERSONA_CONFIGS["N2_strict_merciful"]}
@@ -422,37 +441,6 @@ def run(backend: str = "hf", smoke: bool = False):
         print_summary(normal_summary, label="Normal")
         record_summary(summary_records, "R Sweep With RAG", config_name, "Normal", normal_summary)
 
-    print("\n=== Architecture 2 — Retrieval Top-K Sweep (R=completeness only) ===", flush=True)
-    for top_k in retrieval_top_k_values:
-        print(f"\n--- top_k={top_k} ---", flush=True)
-        retriever = build_shared_retriever(top_k=top_k)
-        print("Building completeness-only debate graph...", flush=True)
-        fn = make_arch2_critic_fn(
-            client,
-            ["completeness"],
-            retriever_per_role={"completeness": retriever},
-        )
-        print("Running Hard Negative dataset...", flush=True)
-        hn_summary = evaluate_dataset(
-            str(HARD_NEGATIVE_PATH),
-            fn,
-            run_label=f"Retrieval Top-K / top_k={top_k} / Hard Negative",
-            verbose=True,
-            limit=sample_limit,
-        )
-        print_summary(hn_summary, label="Hard Negative")
-        record_summary(summary_records, "Retrieval Top-K", f"top_k={top_k}", "Hard Negative", hn_summary)
-        print("Running Normal dataset...", flush=True)
-        normal_summary = evaluate_dataset(
-            str(NORMAL_PATH),
-            fn,
-            run_label=f"Retrieval Top-K / top_k={top_k} / Normal",
-            verbose=True,
-            limit=sample_limit,
-        )
-        print_summary(normal_summary, label="Normal")
-        record_summary(summary_records, "Retrieval Top-K", f"top_k={top_k}", "Normal", normal_summary)
-
     nkm_retrievers = {
         rag_label: (build_shared_retriever(top_k=top_k) if top_k is not None else None)
         for rag_label, top_k in NKM_RAG_VARIANTS
@@ -530,36 +518,70 @@ def run(backend: str = "hf", smoke: bool = False):
                 )
 
         if secondary_client is None:
-            print("\nSkipping M Sweep (no secondary model configured; SECONDARY_MODEL_NAME is None).", flush=True)
+            print("\nSkipping M/NM Sweeps (no secondary model configured; SECONDARY_MODEL_NAME is None).", flush=True)
         else:
+            model_list = [("qwen", client), ("llama", secondary_client)]
+
             print(
-                f"\n=== Architecture 2 — M Sweep{rag_tag} (model diversity within role, persona fixed=neutral) ===",
+                f"\n=== Architecture 2 — M Sweep{rag_tag} (model diversity within role, persona fixed=neutral, K sweep) ===",
                 flush=True,
             )
-            model_list = [("qwen", client), ("llama", secondary_client)]
-            for role in M_SWEEP_ROLES:
-                print(f"\n--- {role}{rag_tag} (Qwen + Llama) ---", flush=True)
-                fn = make_m_sweep_critic_fn(role, model_list, retriever=retriever)
+            for k in k_values:
+                for role in M_SWEEP_ROLES:
+                    print(f"\n--- K={k} / {role}{rag_tag} (Qwen + Llama) ---", flush=True)
+                    fn = make_m_sweep_critic_fn(role, model_list, retriever=retriever, max_rounds=k + 1)
+                    print("Running Hard Negative dataset...", flush=True)
+                    hn_summary = evaluate_dataset(
+                        str(HARD_NEGATIVE_PATH),
+                        fn,
+                        run_label=f"M Sweep{rag_tag} / K={k} / {role} / Hard Negative",
+                        verbose=True,
+                        limit=sample_limit,
+                    )
+                    print_summary(hn_summary, label="Hard Negative")
+                    record_summary(summary_records, f"M Sweep{rag_tag}", f"K={k}/{role}", "Hard Negative", hn_summary)
+                    print("Running Normal dataset...", flush=True)
+                    normal_summary = evaluate_dataset(
+                        str(NORMAL_PATH),
+                        fn,
+                        run_label=f"M Sweep{rag_tag} / K={k} / {role} / Normal",
+                        verbose=True,
+                        limit=sample_limit,
+                    )
+                    print_summary(normal_summary, label="Normal")
+                    record_summary(summary_records, f"M Sweep{rag_tag}", f"K={k}/{role}", "Normal", normal_summary)
+
+            print(
+                f"\n=== Architecture 2 — NM Sweep{rag_tag} (persona AND model both vary, K sweep) ===",
+                flush=True,
+            )
+            nm_specs = [
+                (NM_SWEEP_ROLE, persona, label, secondary_client if label == "llama" else client)
+                for persona, label in NM_SWEEP_SPEC
+            ]
+            for k in k_values:
+                print(f"\n--- K={k} / {NM_SWEEP_ROLE}{rag_tag} ({NM_SWEEP_SPEC}) ---", flush=True)
+                fn = make_nm_sweep_critic_fn(nm_specs, retriever=retriever, max_rounds=k + 1)
                 print("Running Hard Negative dataset...", flush=True)
                 hn_summary = evaluate_dataset(
                     str(HARD_NEGATIVE_PATH),
                     fn,
-                    run_label=f"M Sweep{rag_tag} / {role} / Hard Negative",
+                    run_label=f"NM Sweep{rag_tag} / K={k} / Hard Negative",
                     verbose=True,
                     limit=sample_limit,
                 )
                 print_summary(hn_summary, label="Hard Negative")
-                record_summary(summary_records, f"M Sweep{rag_tag}", role, "Hard Negative", hn_summary)
+                record_summary(summary_records, f"NM Sweep{rag_tag}", f"K={k}", "Hard Negative", hn_summary)
                 print("Running Normal dataset...", flush=True)
                 normal_summary = evaluate_dataset(
                     str(NORMAL_PATH),
                     fn,
-                    run_label=f"M Sweep{rag_tag} / {role} / Normal",
+                    run_label=f"NM Sweep{rag_tag} / K={k} / Normal",
                     verbose=True,
                     limit=sample_limit,
                 )
                 print_summary(normal_summary, label="Normal")
-                record_summary(summary_records, f"M Sweep{rag_tag}", role, "Normal", normal_summary)
+                record_summary(summary_records, f"NM Sweep{rag_tag}", f"K={k}", "Normal", normal_summary)
 
     print("\nFLETCHER evaluation run completed.", flush=True)
     print_final_recap(summary_records)

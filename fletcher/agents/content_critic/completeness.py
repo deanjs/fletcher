@@ -11,14 +11,13 @@ class CompletenessCritic:
         self.client = client
         self.retriever = retriever
         self.last_response: LLMResponse | None = None
-        self.last_debate_response: LLMResponse | None = None
-        self.last_debate_text: str = ""
 
     def evaluate(
         self,
         explanation: str,
         config: GenerationConfig | None = None,
         debate_history: list[dict] | None = None,
+        request_message: bool = False,
     ) -> CriticVerdict:
         context = self._build_reference_context(explanation)
         debate_context = self._build_debate_context(debate_history)
@@ -45,14 +44,32 @@ class CompletenessCritic:
             )
             user_content = f"Student explanation:\n{explanation}"
 
+        if request_message:
+            message_instruction = (
+                "Also include a \"message_to_others\" field: 2-3 sentences stating your "
+                "position to the other critics, defending your judgment and directly "
+                "addressing any disagreement from the previous round.\n"
+                if debate_history
+                else "Also include a \"message_to_others\" field: 2-3 sentences stating your "
+                "initial position to the other critics.\n"
+            )
+            schema_line = (
+                '{"flagged": true or false, "confidence": 0.0 to 1.0, "reasoning": "...", '
+                '"message_to_others": "..."}'
+            )
+        else:
+            message_instruction = ""
+            schema_line = '{"flagged": true or false, "confidence": 0.0 to 1.0, "reasoning": "..."}'
+
         messages = [
             Message(
                 role="system",
                 content=(
                     f"{instruction}"
                     f"{debate_context}"
+                    f"{message_instruction}"
                     "Respond with ONLY a JSON object in this exact format, no other text:\n"
-                    '{"flagged": true or false, "confidence": 0.0 to 1.0, "reasoning": "..."}'
+                    f"{schema_line}"
                 ),
             ),
             Message(
@@ -64,48 +81,6 @@ class CompletenessCritic:
         response = self.client.generate(messages, config=config)
         self.last_response = response
         return self._parse(response.text)
-
-    def compose_debate_turn(
-        self,
-        explanation: str,
-        verdict: CriticVerdict,
-        debate_history: list[dict] | None = None,
-        config: GenerationConfig | None = None,
-    ) -> str:
-        debate_context = self._build_debate_context(debate_history)
-        round_instruction = (
-            "State your current position to the other critics in two or three sentences. "
-            "Defend your judgment and address any disagreement directly."
-            if debate_history
-            else "State your initial position to the other critics in two or three sentences."
-        )
-        messages = [
-            Message(
-                role="system",
-                content=(
-                    "You are the Completeness Critic in a multi-agent debate. "
-                    "Write a short message to the other critics about your current judgment. "
-                    "Focus on missing concepts supported by the reference material.\n\n"
-                    f"{debate_context}"
-                    f"{round_instruction}"
-                ),
-            ),
-            Message(
-                role="user",
-                content=(
-                    f"Student explanation:\n\n{explanation}\n\n"
-                    f"Your current verdict:\n"
-                    f"- flagged: {verdict.flagged}\n"
-                    f"- confidence: {verdict.confidence}\n"
-                    f"- reasoning: {verdict.reasoning}"
-                ),
-            ),
-        ]
-
-        response = self.client.generate(messages, config=config)
-        self.last_debate_response = response
-        self.last_debate_text = response.text
-        return response.text
 
     def _parse(self, text: str) -> CriticVerdict:
         try:
@@ -132,21 +107,32 @@ class CompletenessCritic:
 
         previous_round = debate_history[-1]
         prior_verdicts = previous_round.get("verdicts", {})
-        lines = []
-        for other_role, verdict in prior_verdicts.items():
-            if other_role == "completeness":
-                continue
-            role_name = other_role.replace("_", " ").title()
-            lines.append(
-                f"In the previous round, the {role_name} Critic set flagged={verdict['flagged']} "
-                f"with confidence={verdict['confidence']:.2f} and reasoning: {verdict['reasoning']}"
-            )
 
-        if not lines:
+        own_verdict = prior_verdicts.get("completeness")
+        others = {k: v for k, v in prior_verdicts.items() if k != "completeness"}
+        if not own_verdict and not others:
             return ""
 
-        return (
-            "Reconsider your evaluation in light of the previous round judgments from other critics.\n"
-            + "\n".join(lines)
-            + "\n\n"
+        payload = {}
+        if own_verdict:
+            payload["your_previous_verdict"] = {
+                "flagged": own_verdict["flagged"],
+                "confidence": own_verdict["confidence"],
+                "reasoning": own_verdict["reasoning"],
+            }
+        if others:
+            payload["other_critics_previous_round"] = {
+                other_key: {
+                    "flagged": v["flagged"],
+                    "confidence": v["confidence"],
+                    "message": v.get("message_to_others") or v.get("reasoning", ""),
+                }
+                for other_key, v in others.items()
+            }
+
+        instruction = (
+            "Reconsider your evaluation. Keep your own position unless another critic's "
+            "argument genuinely changes your assessment — do not switch just because someone "
+            "else disagreed with you.\n"
         )
+        return instruction + json.dumps(payload) + "\n\n"

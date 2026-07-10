@@ -44,10 +44,14 @@ def _run_ensemble_debate(
     total_llm_calls = 0
     rounds_run = 0
 
+    if verbose:
+        topic = explanation if len(explanation) <= 160 else explanation[:157] + "..."
+        print(f"[{log_prefix}] Debate topic: \"{topic}\"", flush=True)
+        print(flush=True)
+
     for round_index in range(max_rounds):
         rounds_run = round_index + 1
         round_verdicts: dict[str, dict] = {}
-        round_debate_turns: dict[str, str] = {}
 
         for key, (role, critic) in critics.items():
             verdict = critic.evaluate(
@@ -55,40 +59,29 @@ def _run_ensemble_debate(
                 config=config,
                 debate_history=debate_history,
                 debate_key=key,
-            )
-            debate_text = critic.compose_debate_turn(
-                explanation,
-                verdict,
-                debate_history=debate_history,
-                config=config,
-                debate_key=key,
+                request_message=True,
             )
 
             if verbose:
+                recipients = [other_key for other_key in critics if other_key != key]
                 print(
                     f"[{log_prefix}][{key}][round {rounds_run}] "
                     f"flagged={verdict.flagged} confidence={verdict.confidence:.2f}",
                     flush=True,
                 )
+                print(f"    reasoning: {verdict.reasoning}", flush=True)
+                print(f"    [{key} -> {', '.join(recipients)}]: {verdict.message_to_others}", flush=True)
 
             round_verdicts[key] = verdict.model_dump()
-            round_debate_turns[key] = debate_text
             latest_verdicts[key] = verdict
 
             response = critic.last_response
-            debate_response = critic.last_debate_response
             if response:
                 total_prompt_tokens += response.prompt_tokens
                 total_completion_tokens += response.completion_tokens
                 total_llm_calls += 1
-            if debate_response:
-                total_prompt_tokens += debate_response.prompt_tokens
-                total_completion_tokens += debate_response.completion_tokens
-                total_llm_calls += 1
 
-        debate_history.append(
-            {"round": rounds_run, "verdicts": round_verdicts, "debate_turns": round_debate_turns}
-        )
+        debate_history.append({"round": rounds_run, "verdicts": round_verdicts})
 
         flags = {v.flagged for v in latest_verdicts.values()}
         if len(flags) == 1:
@@ -181,4 +174,39 @@ def run_model_debate(
 
     return _run_ensemble_debate(
         critics, explanation, config, max_rounds, verbose, log_prefix="model_debate"
+    )
+
+
+def run_combined_debate(
+    specs: list[tuple[str, str, str, LLMClient]],
+    explanation: str,
+    config: GenerationConfig | None = None,
+    retriever: "LectureNoteRetriever | None" = None,
+    max_rounds: int = MAX_PERSONA_ROUNDS,
+    verbose: bool = False,
+) -> dict:
+    """NM-axis Stage-1 debate: persona AND model both vary at once.
+
+    Only use this AFTER N (persona alone) and M (model alone) have each been
+    validated independently — with both axes varying together, any observed
+    disagreement or accuracy change can no longer be attributed to persona
+    vs. model specifically. This is the deliberate follow-up combination
+    experiment, not a substitute for the isolated N/M sweeps.
+
+    `specs` is a list of (role, persona, label, client) tuples, e.g.
+    [("conceptual", "strict", "qwen", qwen_client),
+     ("conceptual", "merciful", "llama", llama_client)].
+    `label` only needs to be unique per role+persona pair (matters when the
+    same persona is reused with a different model).
+    """
+    critics: dict[str, tuple[str, object]] = {}
+    for role, persona, label, model_client in specs:
+        critic_cls = PERSONA_CRITIC_CLASSES.get(role)
+        if critic_cls is None:
+            raise ValueError(f"Unsupported role for combined debate: {role}")
+        key = _model_debate_key(role, persona, label)
+        critics[key] = (role, critic_cls(model_client, persona=persona, retriever=retriever))
+
+    return _run_ensemble_debate(
+        critics, explanation, config, max_rounds, verbose, log_prefix="combined_debate"
     )
