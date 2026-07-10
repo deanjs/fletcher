@@ -1,4 +1,5 @@
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -20,6 +21,7 @@ if TYPE_CHECKING:
 
 HARD_NEGATIVE_PATH = Path(__file__).parent / "datasets/hard_negative/hard_negatives.json"
 NORMAL_PATH = Path(__file__).parent / "datasets/normal/normal_explanations.json"
+DEBATE_LOG_DIR = Path(__file__).parent / "debate_logs"
 EVAL_CONFIG = GenerationConfig(temperature=0.0, max_new_tokens=256)
 
 ROLE_CONFIGS = {
@@ -197,6 +199,7 @@ def make_n_sweep_critic_fn(client, persona_list, retriever=None, client_per_key=
             result["prompt_tokens"],
             result["completion_tokens"],
             result["llm_calls"],
+            result["debate_log"],
         )
 
     return critic_fn
@@ -223,6 +226,7 @@ def make_m_sweep_critic_fn(role, client_list, retriever=None, max_rounds=None):
             result["prompt_tokens"],
             result["completion_tokens"],
             result["llm_calls"],
+            result["debate_log"],
         )
 
     return critic_fn
@@ -247,6 +251,7 @@ def make_nm_sweep_critic_fn(specs, retriever=None, max_rounds=None):
             result["prompt_tokens"],
             result["completion_tokens"],
             result["llm_calls"],
+            result["debate_log"],
         )
 
     return critic_fn
@@ -289,11 +294,19 @@ def print_final_recap(summary_records: list[dict]) -> None:
         )
 
 
-def run(backend: str = "hf", smoke: bool = False):
+def run(backend: str = "hf", smoke: bool = False, log_debates: bool = False, debate_log_path: str | None = None):
     print("Starting FLETCHER evaluation run...", flush=True)
     print(f"Backend: {backend}", flush=True)
     if smoke:
         print("SMOKE TEST MODE: 1 sample/dataset, minimal configs per section.", flush=True)
+    if log_debates or debate_log_path is not None:
+        if debate_log_path is None:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            mode = "smoke" if smoke else "full"
+            debate_log_path = str(DEBATE_LOG_DIR / f"{timestamp}_{backend}_{mode}.jsonl")
+        Path(debate_log_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(debate_log_path).write_text("")
+        print(f"Debate logs will be written to: {debate_log_path}", flush=True)
     if torch is not None:
         torch.manual_seed(42)
         print("Torch manual seed set to 42.", flush=True)
@@ -334,10 +347,15 @@ def run(backend: str = "hf", smoke: bool = False):
 
     summary_records = []
 
+    def run_eval(*args, **kwargs):
+        if debate_log_path is not None:
+            kwargs["debate_log_path"] = debate_log_path
+        return evaluate_dataset(*args, **kwargs)
+
     print("=== Architecture 1a (Self-Critique, 1-pass baseline) ===", flush=True)
     arch1a_fn = make_arch1a_critic_fn(client)
     print("Running Architecture 1a on Hard Negative dataset...", flush=True)
-    arch1a_hn = evaluate_dataset(
+    arch1a_hn = run_eval(
         str(HARD_NEGATIVE_PATH),
         arch1a_fn,
         run_label="Architecture 1a / Hard Negative",
@@ -347,7 +365,7 @@ def run(backend: str = "hf", smoke: bool = False):
     print_summary(arch1a_hn, label="Hard Negative")
     record_summary(summary_records, "Architecture 1a", "Self-Critique-1Pass", "Hard Negative", arch1a_hn)
     print("Running Architecture 1a on Normal dataset...", flush=True)
-    arch1a_normal = evaluate_dataset(
+    arch1a_normal = run_eval(
         str(NORMAL_PATH),
         arch1a_fn,
         run_label="Architecture 1a / Normal",
@@ -360,7 +378,7 @@ def run(backend: str = "hf", smoke: bool = False):
     print("\n=== Architecture 1b (Self-Critique, adaptive) ===", flush=True)
     arch1b_fn = make_arch1b_critic_fn(client)
     print("Running Architecture 1b on Hard Negative dataset...", flush=True)
-    arch1b_hn = evaluate_dataset(
+    arch1b_hn = run_eval(
         str(HARD_NEGATIVE_PATH),
         arch1b_fn,
         run_label="Architecture 1b / Hard Negative",
@@ -370,7 +388,7 @@ def run(backend: str = "hf", smoke: bool = False):
     print_summary(arch1b_hn, label="Hard Negative")
     record_summary(summary_records, "Architecture 1b", "Self-Critique-Adaptive", "Hard Negative", arch1b_hn)
     print("Running Architecture 1b on Normal dataset...", flush=True)
-    arch1b_normal = evaluate_dataset(
+    arch1b_normal = run_eval(
         str(NORMAL_PATH),
         arch1b_fn,
         run_label="Architecture 1b / Normal",
@@ -390,7 +408,7 @@ def run(backend: str = "hf", smoke: bool = False):
             retriever_per_role=None,
         )
         print("Running Hard Negative dataset...", flush=True)
-        hn_summary = evaluate_dataset(
+        hn_summary = run_eval(
             str(HARD_NEGATIVE_PATH),
             fn,
             run_label=f"R Sweep / {config_name} / Hard Negative",
@@ -400,7 +418,7 @@ def run(backend: str = "hf", smoke: bool = False):
         print_summary(hn_summary, label="Hard Negative")
         record_summary(summary_records, "R Sweep No RAG", config_name, "Hard Negative", hn_summary)
         print("Running Normal dataset...", flush=True)
-        normal_summary = evaluate_dataset(
+        normal_summary = run_eval(
             str(NORMAL_PATH),
             fn,
             run_label=f"R Sweep / {config_name} / Normal",
@@ -421,7 +439,7 @@ def run(backend: str = "hf", smoke: bool = False):
             retriever_per_role=make_retriever_per_role(roles, shared_retriever),
         )
         print("Running Hard Negative dataset...", flush=True)
-        hn_summary = evaluate_dataset(
+        hn_summary = run_eval(
             str(HARD_NEGATIVE_PATH),
             fn,
             run_label=f"R Sweep With RAG / {config_name} / Hard Negative",
@@ -431,7 +449,7 @@ def run(backend: str = "hf", smoke: bool = False):
         print_summary(hn_summary, label="Hard Negative")
         record_summary(summary_records, "R Sweep With RAG", config_name, "Hard Negative", hn_summary)
         print("Running Normal dataset...", flush=True)
-        normal_summary = evaluate_dataset(
+        normal_summary = run_eval(
             str(NORMAL_PATH),
             fn,
             run_label=f"R Sweep With RAG / {config_name} / Normal",
@@ -459,7 +477,7 @@ def run(backend: str = "hf", smoke: bool = False):
                 retriever=retriever,
             )
             print("Running Hard Negative dataset...", flush=True)
-            hn_summary = evaluate_dataset(
+            hn_summary = run_eval(
                 str(HARD_NEGATIVE_PATH),
                 fn,
                 run_label=f"N Sweep{rag_tag} / {config_name} / Hard Negative",
@@ -469,7 +487,7 @@ def run(backend: str = "hf", smoke: bool = False):
             print_summary(hn_summary, label="Hard Negative")
             record_summary(summary_records, f"N Sweep{rag_tag}", config_name, "Hard Negative", hn_summary)
             print("Running Normal dataset...", flush=True)
-            normal_summary = evaluate_dataset(
+            normal_summary = run_eval(
                 str(NORMAL_PATH),
                 fn,
                 run_label=f"N Sweep{rag_tag} / {config_name} / Normal",
@@ -493,7 +511,7 @@ def run(backend: str = "hf", smoke: bool = False):
                     max_rounds=k + 1,
                 )
                 print("Running Hard Negative dataset...", flush=True)
-                hn_summary = evaluate_dataset(
+                hn_summary = run_eval(
                     str(HARD_NEGATIVE_PATH),
                     fn,
                     run_label=f"K Sweep{rag_tag} / K={k} / {config_name} / Hard Negative",
@@ -505,7 +523,7 @@ def run(backend: str = "hf", smoke: bool = False):
                     summary_records, f"K Sweep{rag_tag}", f"K={k}/{config_name}", "Hard Negative", hn_summary
                 )
                 print("Running Normal dataset...", flush=True)
-                normal_summary = evaluate_dataset(
+                normal_summary = run_eval(
                     str(NORMAL_PATH),
                     fn,
                     run_label=f"K Sweep{rag_tag} / K={k} / {config_name} / Normal",
@@ -531,7 +549,7 @@ def run(backend: str = "hf", smoke: bool = False):
                     print(f"\n--- K={k} / {role}{rag_tag} (Qwen + Llama) ---", flush=True)
                     fn = make_m_sweep_critic_fn(role, model_list, retriever=retriever, max_rounds=k + 1)
                     print("Running Hard Negative dataset...", flush=True)
-                    hn_summary = evaluate_dataset(
+                    hn_summary = run_eval(
                         str(HARD_NEGATIVE_PATH),
                         fn,
                         run_label=f"M Sweep{rag_tag} / K={k} / {role} / Hard Negative",
@@ -541,7 +559,7 @@ def run(backend: str = "hf", smoke: bool = False):
                     print_summary(hn_summary, label="Hard Negative")
                     record_summary(summary_records, f"M Sweep{rag_tag}", f"K={k}/{role}", "Hard Negative", hn_summary)
                     print("Running Normal dataset...", flush=True)
-                    normal_summary = evaluate_dataset(
+                    normal_summary = run_eval(
                         str(NORMAL_PATH),
                         fn,
                         run_label=f"M Sweep{rag_tag} / K={k} / {role} / Normal",
@@ -563,7 +581,7 @@ def run(backend: str = "hf", smoke: bool = False):
                 print(f"\n--- K={k} / {NM_SWEEP_ROLE}{rag_tag} ({NM_SWEEP_SPEC}) ---", flush=True)
                 fn = make_nm_sweep_critic_fn(nm_specs, retriever=retriever, max_rounds=k + 1)
                 print("Running Hard Negative dataset...", flush=True)
-                hn_summary = evaluate_dataset(
+                hn_summary = run_eval(
                     str(HARD_NEGATIVE_PATH),
                     fn,
                     run_label=f"NM Sweep{rag_tag} / K={k} / Hard Negative",
@@ -573,7 +591,7 @@ def run(backend: str = "hf", smoke: bool = False):
                 print_summary(hn_summary, label="Hard Negative")
                 record_summary(summary_records, f"NM Sweep{rag_tag}", f"K={k}", "Hard Negative", hn_summary)
                 print("Running Normal dataset...", flush=True)
-                normal_summary = evaluate_dataset(
+                normal_summary = run_eval(
                     str(NORMAL_PATH),
                     fn,
                     run_label=f"NM Sweep{rag_tag} / K={k} / Normal",
@@ -598,5 +616,20 @@ if __name__ == "__main__":
         help="Smoke test: 1 sample/dataset, minimal configs per section. Use to sanity-check "
         "the pipeline before spending GPU time on the full sweep.",
     )
+    parser.add_argument(
+        "--log-debates",
+        action="store_true",
+        help="Write debate-capable Architecture 2 runs to eval/debate_logs/*.jsonl.",
+    )
+    parser.add_argument(
+        "--debate-log-path",
+        default=None,
+        help="Explicit JSONL path for debate logs. Implies --log-debates.",
+    )
     args = parser.parse_args()
-    run(backend=args.backend, smoke=args.smoke)
+    run(
+        backend=args.backend,
+        smoke=args.smoke,
+        log_debates=args.log_debates,
+        debate_log_path=args.debate_log_path,
+    )

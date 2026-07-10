@@ -32,10 +32,11 @@ class EvalSummary:
 
 def evaluate_dataset(
     dataset_path: str,
-    critic_fn: Callable[[str], tuple[bool, float, int, int, int]],
+    critic_fn: Callable[[str], tuple],
     run_label: str = "",
     verbose: bool = False,
     limit: int | None = None,
+    debate_log_path: str | Path | None = None,
 ) -> EvalSummary:
     with open(dataset_path) as f:
         dataset = json.load(f)
@@ -53,7 +54,9 @@ def evaluate_dataset(
                 f"{item['id']} ({item['topic']})",
                 flush=True,
             )
-        flagged, latency_ms, prompt_tokens, completion_tokens, llm_calls = critic_fn(item["explanation"])
+        critic_result = critic_fn(item["explanation"])
+        flagged, latency_ms, prompt_tokens, completion_tokens, llm_calls = critic_result[:5]
+        debate_log = critic_result[5] if len(critic_result) > 5 else None
 
         results.append(EvalResult(
             id=item["id"],
@@ -66,6 +69,18 @@ def evaluate_dataset(
             completion_tokens=completion_tokens,
             llm_calls=llm_calls,
         ))
+        if debate_log_path is not None and debate_log is not None:
+            _append_debate_log(
+                debate_log_path,
+                debate_log,
+                item=item,
+                run_label=run_label,
+                predicted=flagged,
+                latency_ms=latency_ms,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                llm_calls=llm_calls,
+            )
 
         if verbose:
             print(flush=True)
@@ -94,3 +109,56 @@ def print_summary(summary: EvalSummary, label: str = "") -> None:
     print(f"avg completion tokens: {summary.avg_completion_tokens:.1f}", flush=True)
     print(f"avg llm calls:         {summary.avg_llm_calls:.1f}", flush=True)
     print(flush=True)
+
+
+def _append_debate_log(
+    path: str | Path,
+    debate_log: dict,
+    item: dict,
+    run_label: str,
+    predicted: bool,
+    latency_ms: float,
+    prompt_tokens: int,
+    completion_tokens: int,
+    llm_calls: int,
+) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    record = dict(debate_log)
+    record["log_id"] = f"{item['id']}__{_slug(run_label)}"
+    record["sample_id"] = item["id"]
+    record["run_label"] = run_label
+    record["input"] = {
+        **record.get("input", {}),
+        "topic": item.get("topic", ""),
+        "explanation": item["explanation"],
+    }
+    record["label"] = {
+        "expected_flagged": item["label"],
+        "source": "hard_negative" if item["label"] else "normal",
+    }
+    record["prediction"] = {
+        "predicted_flagged": predicted,
+        "correct": predicted == item["label"],
+    }
+    record["metrics"] = {
+        **record.get("metrics", {}),
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "llm_calls": llm_calls,
+        "latency_ms": latency_ms,
+    }
+    if "final" in record:
+        record["final"] = {
+            **record["final"],
+            "correct": predicted == item["label"],
+        }
+
+    with path.open("a") as f:
+        f.write(json.dumps(record, sort_keys=True) + "\n")
+
+
+def _slug(text: str) -> str:
+    slug = "".join(ch.lower() if ch.isalnum() else "_" for ch in text)
+    return "_".join(part for part in slug.split("_") if part)
